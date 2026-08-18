@@ -1,0 +1,693 @@
+import type { NextApiRequest, NextApiResponse } from "next";
+import prisma from "@/utils/database";
+import { withPermissionCheck } from "@/utils/permissionsManager";
+import { getConfig } from "@/utils/configEngine";
+import { getThumbnail } from "@/utils/userinfoEngine";
+import { getGroupRoles } from "@/utils/roblox";
+
+export default withPermissionCheck(
+  async (req: NextApiRequest, res: NextApiResponse) => {
+    if (req.method !== "GET") {
+      return res.status(405).json({ error: "Method not allowed" });
+    }
+
+    const workspaceGroupId = parseInt(req.query.id as string);
+    const page = parseInt(req.query.page as string) || 0;
+    const pageSize = parseInt(req.query.pageSize as string) || 10;
+
+    let filters: any[] = [];
+    if (req.query.filters && typeof req.query.filters === "string") {
+      try {
+        filters = JSON.parse(req.query.filters);
+      } catch (e) {
+        console.error("Failed to parse filters:", e);
+      }
+    }
+    const filterOperator: 'AND' | 'OR' = (req.query.filterOperator as string) === 'OR' ? 'OR' : 'AND';
+
+    let visibleColumns: string[] = [];
+    if (req.query.columns && typeof req.query.columns === "string") {
+      try {
+        visibleColumns = JSON.parse(req.query.columns);
+      } catch (e) {
+        console.error("Failed to parse columns:", e);
+      }
+    }
+
+    try {
+      const lastReset = await prisma.activityReset.findFirst({
+        where: {
+          workspaceGroupId,
+        },
+        orderBy: {
+          resetAt: "desc",
+        },
+        select: {
+          resetAt: true,
+          previousPeriodStart: true,
+          previousPeriodEnd: true,
+        },
+      });
+
+      const secondLastReset = await prisma.activityReset.findFirst({
+        where: {
+          workspaceGroupId,
+          resetAt: {
+            lt: lastReset?.resetAt || new Date(),
+          },
+        },
+        orderBy: {
+          resetAt: "desc",
+        },
+        select: {
+          resetAt: true,
+          previousPeriodStart: true,
+          previousPeriodEnd: true,
+        },
+      });
+
+      const startDate = lastReset?.resetAt || new Date("2025-01-01");
+      const currentDate = new Date();
+      const lastPeriodEnd = lastReset?.previousPeriodEnd || null;
+
+      const activityConfig = await getConfig("activity", workspaceGroupId);
+      const idleTimeEnabled = activityConfig?.idleTimeEnabled ?? true;
+      const usernameFilters = filters.filter((f) => f.column === "username");
+      const nonUsernameFilters = filters.filter((f) => f.column !== "username");
+      const hasUsernameFilter = usernameFilters.length > 0;
+      const mixedOrMode = filterOperator === 'OR' && hasUsernameFilter && nonUsernameFilters.length > 0;
+      const whereClause: any = {
+        roles: {
+          some: {
+            workspaceGroupId,
+          },
+        },
+      };
+
+      if (hasUsernameFilter && !mixedOrMode) {
+        const usernameConditions = usernameFilters.map((filter) => {
+          if (filter.filter === "equal") {
+            return { username: filter.value };
+          } else if (filter.filter === "notEqual") {
+            return { username: { not: filter.value } };
+          } else if (filter.filter === "contains") {
+            return { username: { contains: filter.value, mode: "insensitive" } };
+          }
+          return {};
+        });
+
+        if (usernameConditions.length > 0) {
+          if (filterOperator === 'OR') {
+            whereClause.OR = usernameConditions;
+          } else {
+            whereClause.AND = usernameConditions;
+          }
+        }
+      }
+      const computedFilters = mixedOrMode
+        ? filters
+        : filters.filter((f) => f.column !== "username");
+      const needsFullComputation = computedFilters.length > 0;
+
+      // Determine what data to fetch based on visible columns and filters
+      const needsBook = visibleColumns.length === 0 || visibleColumns.includes("book") || filters.some(f => f.column === "warnings");
+      const needsWallPosts = visibleColumns.length === 0 || visibleColumns.includes("wallPosts");
+      const needsInactivityNotices = true;
+      const needsSessions = visibleColumns.length === 0 || visibleColumns.includes("hostedSessions") || visibleColumns.includes("sessionsAttended") || filters.some(f => ["sessions", "hosted"].includes(f.column));
+      const needsRanks = visibleColumns.length === 0 || visibleColumns.includes("rankName") || visibleColumns.includes("rankID") || filters.some(f => f.column === "rank");
+      const needsActivity = visibleColumns.length === 0 || visibleColumns.includes("minutes") || visibleColumns.includes("idleMinutes") || visibleColumns.includes("messages") || filters.some(f => ["minutes", "idle", "messages"].includes(f.column));
+      const needsQuota = visibleColumns.length === 0 || visibleColumns.includes("quota") || visibleColumns.includes("quotaFailed") || filters.some(f => ["quota", "quotaFailed"].includes(f.column));
+      const needsDepartments = visibleColumns.length === 0 || visibleColumns.includes("departments") || filters.some(f => f.column === "department");
+
+      let allUsers: any[] = [];
+      let paginatedUsers: any[] = [];
+      let totalFilteredUsers = 0;
+
+      if (needsFullComputation) {
+        allUsers = await prisma.user.findMany({
+          where: whereClause,
+          include: {
+            book: needsBook ? { where: { workspaceGroupId, NOT: { redacted: true } } } : false,
+            wallPosts: needsWallPosts,
+            inactivityNotices: needsInactivityNotices,
+            sessions: needsSessions,
+            ranks: needsRanks ? {
+              where: {
+                workspaceGroupId,
+              },
+            } : false,
+            roles: needsQuota ? {
+              where: {
+                workspaceGroupId,
+              },
+              include: {
+                quotaRoles: {
+                  include: {
+                    quota: true,
+                  },
+                },
+              },
+            } : {
+              where: {
+                workspaceGroupId,
+              },
+            },
+            workspaceMemberships: needsDepartments ? {
+              where: {
+                workspaceGroupId,
+              },
+              include: {
+                departmentMembers: {
+                  include: {
+                    department: true,
+                  },
+                },
+              },
+            } : {
+              where: {
+                workspaceGroupId,
+              },
+            },
+          },
+        });
+      } else {
+        const totalCount = await prisma.user.count({
+          where: whereClause,
+        });
+        totalFilteredUsers = totalCount;
+
+        allUsers = await prisma.user.findMany({
+          where: whereClause,
+          skip: page * pageSize,
+          take: pageSize,
+          include: {
+            book: needsBook ? { where: { workspaceGroupId, NOT: { redacted: true } } } : false,
+            wallPosts: needsWallPosts,
+            inactivityNotices: needsInactivityNotices,
+            sessions: needsSessions,
+            ranks: needsRanks ? {
+              where: {
+                workspaceGroupId,
+              },
+            } : false,
+            roles: needsQuota ? {
+              where: {
+                workspaceGroupId,
+              },
+              include: {
+                quotaRoles: {
+                  include: {
+                    quota: true,
+                  },
+                },
+              },
+            } : {
+              where: {
+                workspaceGroupId,
+              },
+            },
+            workspaceMemberships: needsDepartments ? {
+              where: {
+                workspaceGroupId,
+              },
+              include: {
+                departmentMembers: {
+                  include: {
+                    department: true,
+                  },
+                },
+              },
+            } : {
+              where: {
+                workspaceGroupId,
+              },
+            },
+          },
+        });
+      }
+
+      const robloxRoles = await getGroupRoles(workspaceGroupId);
+      // Sort roles by rank hierarchy (0 → 255) for consistent display
+      robloxRoles.sort((a, b) => a.rank - b.rank);
+      const roleIdToInfoMap = new Map<number, { rank: number; name: string }>();
+      robloxRoles.forEach(role => {
+        roleIdToInfoMap.set(role.id, { rank: role.rank, name: role.name });
+      });
+
+      const userIdsToProcess = allUsers.map((u) => u.userid);
+      
+      // Only fetch activity if needed
+      const allActivity = needsActivity ? await prisma.activitySession.findMany({
+        where: {
+          workspaceGroupId,
+          startTime: {
+            gte: startDate,
+            lte: currentDate,
+          },
+          userId: {
+            in: userIdsToProcess,
+          },
+          archived: { not: true },
+        },
+        select: {
+          userId: true,
+          startTime: true,
+          endTime: true,
+          active: true,
+          idleTime: true,
+          messages: true,
+        },
+      }) : [];
+
+      const userIds = allUsers.map(u => u.userid);
+      const lastPeriodHistory = lastPeriodEnd ? await prisma.activityHistory.findMany({
+        where: {
+          workspaceGroupId,
+          userId: {
+            in: userIds,
+          },
+          periodEnd: lastPeriodEnd,
+        },
+        select: {
+          userId: true,
+          minutes: true,
+          sessionsHosted: true,
+          sessionsAttended: true,
+        },
+      }) : [];
+      const lastPeriodHistoryByUser = new Map<string, any>();
+      lastPeriodHistory.forEach(history => {
+        lastPeriodHistoryByUser.set(history.userId.toString(), history);
+      });
+      
+      const [allAdjustments, allOwnedSessions, allParticipations, allAllyVisits, allCurrentWallPosts] = await Promise.all([
+        needsActivity ? prisma.activityAdjustment.findMany({
+          where: {
+            userId: { in: userIds },
+            workspaceGroupId,
+            createdAt: {
+              gte: startDate,
+              lte: currentDate,
+            },
+            archived: { not: true },
+          },
+        }) : Promise.resolve([]),
+        needsSessions ? prisma.session.findMany({
+          where: {
+            ownerId: { in: userIds },
+            sessionType: { workspaceGroupId },
+            date: {
+              gte: startDate,
+              lte: currentDate,
+            },
+            archived: { not: true },
+          },
+        }) : Promise.resolve([]),
+        needsSessions ? prisma.sessionUser.findMany({
+          where: {
+            userid: { in: userIds },
+            session: {
+              sessionType: { workspaceGroupId },
+              date: {
+                gte: startDate,
+                lte: currentDate,
+              },
+              archived: { not: true },
+            },
+          },
+          include: {
+            session: {
+              select: {
+                id: true,
+                type: true,
+                sessionType: {
+                  select: {
+                    slots: true,
+                    name: true,
+                  },
+                },
+              },
+            },
+          },
+        }) : Promise.resolve([]),
+        (visibleColumns.length === 0 || visibleColumns.includes("allianceVisits")) ? prisma.allyVisit.findMany({
+          where: {
+            ally: {
+              workspaceGroupId: workspaceGroupId,
+            },
+            time: {
+              gte: startDate,
+              lte: currentDate,
+            },
+            OR: [
+              { hostId: { in: userIds } },
+              { participants: { hasSome: userIds.map(id => id.toString()) } },
+            ],
+          },
+          select: {
+            hostId: true,
+            participants: true,
+          },
+        }) : Promise.resolve([]),
+        needsWallPosts ? prisma.wallPost.findMany({
+          where: {
+            authorId: { in: userIds },
+            workspaceGroupId,
+            createdAt: {
+              gte: startDate,
+              lte: currentDate,
+            },
+          },
+        }) : Promise.resolve([]),
+      ]);
+
+      const adjustmentsByUser = new Map<string, any[]>();
+      allAdjustments.forEach(adj => {
+        const key = adj.userId.toString();
+        if (!adjustmentsByUser.has(key)) adjustmentsByUser.set(key, []);
+        adjustmentsByUser.get(key)!.push(adj);
+      });
+
+      const ownedSessionsByUser = new Map<string, any[]>();
+      allOwnedSessions.forEach(sess => {
+        if (!sess.ownerId) return;
+        const key = sess.ownerId.toString();
+        if (!ownedSessionsByUser.has(key)) ownedSessionsByUser.set(key, []);
+        ownedSessionsByUser.get(key)!.push(sess);
+      });
+
+      const participationsByUser = new Map<string, any[]>();
+      allParticipations.forEach(part => {
+        const key = part.userid.toString();
+        if (!participationsByUser.has(key)) participationsByUser.set(key, []);
+        participationsByUser.get(key)!.push(part);
+      });
+
+      const wallPostsByUser = new Map<string, any[]>();
+      allCurrentWallPosts.forEach(post => {
+        const key = post.authorId.toString();
+        if (!wallPostsByUser.has(key)) wallPostsByUser.set(key, []);
+        wallPostsByUser.get(key)!.push(post);
+      });
+
+      const computedUsers: any[] = [];
+
+      for (const user of allUsers) {
+        const userId = user.userid;
+        const userKey = userId.toString();
+        const ms: number[] = [];
+        allActivity
+          .filter((x) => BigInt(x.userId) == userId && !x.active)
+          .forEach((session) => {
+            const sessionDuration =
+              (session.endTime?.getTime() as number) -
+              session.startTime.getTime();
+            const idleTimeMs =
+              idleTimeEnabled && session.idleTime
+                ? Number(session.idleTime) * 60000
+                : 0;
+            ms.push(sessionDuration - idleTimeMs);
+          });
+
+        const ims: number[] = [];
+        if (idleTimeEnabled) {
+          allActivity
+            .filter((x: any) => BigInt(x.userId) == userId)
+            .forEach((s: any) => {
+              ims.push(Number(s.idleTime));
+            });
+        }
+
+        const messages: number[] = [];
+        allActivity
+          .filter((x: any) => BigInt(x.userId) == userId)
+          .forEach((s: any) => {
+            messages.push(s.messages);
+          });
+
+        const userAdjustments = adjustmentsByUser.get(userKey) || [];
+        const allSessionParticipations = participationsByUser.get(userKey) || [];
+
+        const sessionsHosted = allSessionParticipations.filter((participation) => {
+            const sessionSlots = participation.session.sessionType.slots as any[];
+            const matchingSlot = sessionSlots.find((s: any) => s.id === participation.roleID);
+            return matchingSlot?.hostRole === "primary";
+          }).length;
+
+        const sessionsSecondaryHosted = allSessionParticipations.filter((participation) => {
+            const sessionSlots = participation.session.sessionType.slots as any[];
+            const matchingSlot = sessionSlots.find((s: any) => s.id === participation.roleID);
+            return matchingSlot?.hostRole === "secondary";
+          }).length;
+
+        const sessionsAttended = allSessionParticipations.filter((participation) => {
+            const sessionSlots = participation.session.sessionType.slots as any[];
+            const matchingSlot = sessionSlots.find((s: any) => s.id === participation.roleID);
+            return !matchingSlot?.hostRole;
+          }).length;
+
+        const sessionsLogged = new Set(allSessionParticipations.map((p) => p.sessionid)).size;
+
+        const sessionsByType: Record<string, number> = {};
+        const secondaryHostedByType: Record<string, number> = {};
+        for (const p of allSessionParticipations) {
+          const type = (p.session as any)?.type || "other";
+          sessionsByType[type] = (sessionsByType[type] || 0) + 1;
+          const pSlots = (p.session as any)?.sessionType?.slots as any[] || [];
+          const pSlot = pSlots.find((s: any) => s.id === p.roleID);
+          if (pSlot?.hostRole === "secondary") {
+            secondaryHostedByType[type] = (secondaryHostedByType[type] || 0) + 1;
+          }
+        }
+
+        const userIdStr = userId.toString();
+        const allianceVisits = allAllyVisits.filter(
+          visit => visit.hostId.toString() === userIdStr || visit.participants.includes(userIdStr)
+        ).length;
+
+        const currentWallPosts = wallPostsByUser.get(userKey) || [];
+
+        const userQuotas = user.roles
+          .flatMap((role: any) => role.quotaRoles || [])
+          .map((qr: any) => qr.quota)
+          .filter((q: any) => q !== undefined);
+
+        let quota = true;
+        let quotaCompleted = 0;
+        let quotaTotal = 0;
+        if (userQuotas.length > 0) {
+          quotaTotal = userQuotas.length;
+          for (const userQuota of userQuotas) {
+            let currentValue = 0;
+
+            switch (userQuota.type) {
+              case "mins":
+                const totalAdjustmentMinutes = userAdjustments.reduce(
+                  (sum, adj) => sum + adj.minutes,
+                  0
+                );
+                const totalActiveMinutes = ms.length
+                  ? Math.round(ms.reduce((p, c) => p + c) / 60000)
+                  : 0;
+                currentValue = totalActiveMinutes + totalAdjustmentMinutes;
+                break;
+              case "sessions_hosted":
+                if (userQuota.sessionType && userQuota.sessionType !== "all") {
+                  currentValue = sessionsByType[userQuota.sessionType] || 0;
+                } else {
+                  currentValue = sessionsHosted;
+                }
+                break;
+              case "sessions_secondary_host":
+                if (userQuota.sessionType && userQuota.sessionType !== "all") {
+                  currentValue = secondaryHostedByType[userQuota.sessionType] || 0;
+                } else {
+                  currentValue = sessionsSecondaryHosted;
+                }
+                break;
+              case "sessions_attended":
+                currentValue = sessionsAttended;
+                break;
+              case "sessions_logged":
+                if (userQuota.sessionType && userQuota.sessionType !== "all") {
+                  currentValue = sessionsByType[userQuota.sessionType] || 0;
+                } else {
+                  currentValue = sessionsLogged;
+                }
+                break;
+              case "alliance_visits":
+                currentValue = allianceVisits;
+                break;
+            }
+
+            if (currentValue >= userQuota.value) {
+              quotaCompleted++;
+            } else {
+              quota = false;
+            }
+          }
+        } else {
+          quota = false;
+        }
+
+        const totalAdjustmentMs = userAdjustments.reduce(
+          (sum, adj) => sum + adj.minutes * 60000,
+          0
+        );
+
+        const totalActiveMs =
+          (ms.length ? ms.reduce((p, c) => p + c) : 0) + totalAdjustmentMs;
+        const userDepartments = user.workspaceMemberships?.[0]?.departmentMembers?.map(
+          (dm: any) => dm.department.name
+        ) || [];
+        const userHistory = lastPeriodHistoryByUser.get(userKey);
+        const lastPeriodMinutes = userHistory?.minutes ?? null;
+        const lastPeriodSessionsHosted = userHistory?.sessionsHosted ?? null;
+        const lastPeriodSessionsAttended = userHistory?.sessionsAttended ?? null;
+
+        computedUsers.push({
+          info: {
+            userId: Number(user.userid),
+            picture: getThumbnail(user.userid),
+            username: user.username,
+            displayName: user.displayName || user.username,
+          },
+          book: user.book,
+          wallPosts: currentWallPosts,
+          inactivityNotices: user.inactivityNotices ? user.inactivityNotices.map((notice: any) => ({
+            ...notice,
+            userId: notice.userId.toString(),
+          })) : [],
+          sessions: allSessionParticipations,
+          rankID: (() => {
+            if (!user.ranks[0]?.rankId) return 0;
+            const storedValue = Number(user.ranks[0].rankId);
+            if (storedValue > 255) {
+              return roleIdToInfoMap.get(storedValue)?.rank || 0;
+            } else {
+              return storedValue;
+            }
+          })(),
+          rankName: (() => {
+            if (!user.ranks[0]?.rankId) return 'Guest';
+            const storedValue = Number(user.ranks[0].rankId);
+            if (storedValue > 255) {
+              return roleIdToInfoMap.get(storedValue)?.name || 'Guest';
+            } else {
+              const role = robloxRoles.find(r => r.rank === storedValue);
+              return role?.name || 'Guest';
+            }
+          })(),
+          minutes: Math.round(totalActiveMs / 60000),
+          lastPeriodMinutes: lastPeriodMinutes,
+          idleMinutes: ims.length
+            ? Math.round(ims.reduce((p, c) => p + c))
+            : 0,
+          hostedSessions: { length: sessionsHosted },
+          lastPeriodSessionsHosted: lastPeriodSessionsHosted,
+          sessionsAttended: sessionsAttended,
+          lastPeriodSessionsAttended: lastPeriodSessionsAttended,
+          allianceVisits: allianceVisits,
+          messages: messages.length
+            ? Math.round(messages.reduce((p, c) => p + c))
+            : 0,
+          registered: user.registered || false,
+          quota: quota,
+          quotaFailed: !quota,
+          quotaCompleted: quotaCompleted,
+          quotaTotal: quotaTotal,
+          departments: userDepartments,
+        });
+      }
+
+      let ranks: any[] = [];
+      try {
+        ranks = await getGroupRoles(workspaceGroupId);
+        ranks = ranks.sort((a, b) => a.rank - b.rank);
+      } catch (error) {
+        console.error('Error fetching ranks from Roblox:', error);
+        ranks = [];
+      }
+      
+      // Apply post-computation filters (for computed fields like minutes, rank, etc.)
+      let filteredUsers = computedUsers;
+      
+      if (needsFullComputation) {
+        if (computedFilters.length > 0) {
+          const matchesFilter = (user: any, filter: any): boolean => {
+            let value: any;
+            switch (filter.column) {
+              case "username": value = user.username ?? ""; break;
+              case "minutes": value = user.minutes; break;
+              case "idle": value = user.idleMinutes; break;
+              case "rank": value = user.rankID; break;
+              case "sessions": value = user.sessions.length; break;
+              case "hosted": value = user.hostedSessions.length; break;
+              case "warnings":
+                value = Array.isArray(user.book)
+                  ? user.book.filter((b: any) => b.type === "warning" && !b.redacted).length
+                  : 0;
+                break;
+              case "messages": value = user.messages; break;
+              case "notices": value = user.inactivityNotices.length; break;
+              case "registered": value = user.registered; break;
+              case "quota": value = user.quota; break;
+              case "quotaFailed": value = user.quotaFailed; break;
+              case "department": value = user.departments || []; break;
+              default: return true;
+            }
+            switch (filter.filter) {
+              case "equal":
+                if (filter.column === "department") return Array.isArray(value) && value.includes(filter.value);
+                if (typeof value === "boolean") return value === (filter.value === "true");
+                return value == filter.value;
+              case "notEqual":
+                if (filter.column === "department") return Array.isArray(value) && !value.includes(filter.value);
+                if (typeof value === "boolean") return value !== (filter.value === "true");
+                return value != filter.value;
+              case "greaterThan": return value > parseFloat(filter.value);
+              case "lessThan": return value < parseFloat(filter.value);
+              case "contains": return String(value).toLowerCase().includes(filter.value.toLowerCase());
+              default: return true;
+            }
+          };
+          if (filterOperator === 'OR') {
+            filteredUsers = filteredUsers.filter(user => computedFilters.some(f => matchesFilter(user, f)));
+          } else {
+            filteredUsers = filteredUsers.filter(user => computedFilters.every(f => matchesFilter(user, f)));
+          }
+        }
+
+        // Apply pagination after filtering
+        totalFilteredUsers = filteredUsers.length;
+        paginatedUsers = filteredUsers.slice(
+          page * pageSize,
+          (page + 1) * pageSize
+        );
+      } else {
+        paginatedUsers = filteredUsers;
+      }
+
+      const serializedUsers = JSON.parse(
+        JSON.stringify(paginatedUsers, (_key, value) =>
+          typeof value === "bigint" ? value.toString() : value
+        )
+      );
+
+      return res.status(200).json({
+        users: serializedUsers,
+        ranks,
+        pagination: {
+          page,
+          pageSize,
+          totalUsers: totalFilteredUsers,
+          totalPages: Math.ceil(totalFilteredUsers / pageSize),
+        },
+      });
+    } catch (error) {
+      console.error("Error fetching staff data:", error);
+      return res.status(500).json({ error: "Internal server error" });
+    }
+  },
+  ["view_members"]
+);

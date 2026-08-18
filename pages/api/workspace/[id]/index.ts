@@ -1,0 +1,192 @@
+// Next.js API route support: https://nextjs.org/docs/api-routes/introduction
+import type { NextApiRequest, NextApiResponse } from 'next'
+import { fetchworkspace, getConfig, setConfig } from '@/utils/configEngine'
+import prisma, { role } from '@/utils/database';
+import { withSessionRoute } from '@/lib/withSession'
+import { withPermissionCheck } from '@/utils/permissionsManager'
+import { getUsername, getThumbnail, getDisplayName } from '@/utils/userinfoEngine'
+
+type Data = {
+	success: boolean
+	error?: string
+	permissions?: string[]
+	workspace?: {
+		groupId: number
+		groupThumbnail: string
+		groupName: string,
+		roles: any[],
+		yourRole: string | null,
+		yourPermission: string[]
+		isAdmin: boolean
+		ownerId: number | null
+		groupTheme: string,
+		settings: {
+			alliesEnabled: boolean
+			policiesEnabled: boolean
+			recommendationsEnabled: boolean
+			moderationEnabled: boolean
+			applicationsEnabled: boolean
+			widgets: string[]
+			hideEmpty: string[]
+			layout?: Array<{
+				i: string
+				x: number
+				y: number
+				w: number
+				h: number
+				minW?: number
+				minH?: number
+				maxW?: number
+				maxH?: number
+			}>
+		}
+	}
+}
+
+export default withPermissionCheck(handler);
+
+export async function handler(
+	req: NextApiRequest,
+	res: NextApiResponse<Data>
+) {
+	if (req.method !== 'GET') return res.status(405).json({ success: false, error: 'Method not allowed' })
+	if (!req.session.userid) return res.status(401).json({ success: false, error: 'Not authenticated' });
+	if (!req.query.id) return res.status(400).json({ success: false, error: 'Missing required fields' });
+
+	const workspace = await prisma.workspace.findUnique({
+		where: {
+			groupId: parseInt(req.query.id as string)
+		},
+		include: {
+			roles: true
+		}
+	});
+	if (!workspace) return res.status(404).json({ success: false, error: 'Not found' });
+
+	const user = await prisma.user.findFirst({
+		where: {
+			userid: BigInt(req.session.userid)
+		},
+		include: {
+			roles: {
+				where: {
+					workspaceGroupId: workspace.groupId
+				}
+			},
+			workspaceMemberships: {
+				where: {
+					workspaceGroupId: workspace.groupId
+				}
+			}
+		}
+	});
+	if (!user) return res.status(401).json({ success: false, error: 'Unauthorized' });
+
+	const groupName = workspace.groupName || 'Unknown Group';
+	const groupLogo = workspace.groupLogo || '';
+	const themeconfig = await getConfig('theme', workspace.groupId);
+	const sessionTypes = ["shift", "training", "event", "other"];
+	const sessionPermissions: Record<string, string> = {};
+	
+	sessionTypes.forEach(type => {
+		const typeCapitalized = type.charAt(0).toUpperCase() + type.slice(1);
+		sessionPermissions[`See ${typeCapitalized} Sessions`] = `sessions_${type}_see`;
+		sessionPermissions[`Assign users to ${typeCapitalized} Sessions`] = `sessions_${type}_assign`;
+		sessionPermissions[`Assign Self to ${typeCapitalized} Sessions`] = `sessions_${type}_claim`;
+		sessionPermissions[`Create Unscheduled ${typeCapitalized} Sessions`] = `sessions_${type}_unscheduled`;
+		sessionPermissions[`Create Scheduled ${typeCapitalized} Sessions`] = `sessions_${type}_scheduled`;
+		sessionPermissions[`Manage ${typeCapitalized} Sessions`] = `sessions_${type}_manage`;
+	});
+
+	const permissions = {
+		"View wall": "view_wall",
+		"Post on wall": "post_on_wall",
+		"React to wall posts": "react_wall",
+		"Delete wall posts": "delete_wall_posts",
+		"Add photos to wall posts": "add_wall_photos",
+		...sessionPermissions,
+		"View members": "view_members",
+		"View directory": "view_directory",
+		"Use saved views": "use_views",
+		"Create views": "create_views",
+		"Edit views": "edit_views",
+		"Delete views": "delete_views",
+		"Export views": "export_views",
+		"Use mass actions": "use_mass_actions",
+		"Create docs": "create_docs",
+		"Edit docs": "edit_docs",
+		"Delete docs": "delete_docs",
+		"Create policies": "create_policies",
+		"Edit policies": "edit_policies",
+		"Delete policies": "delete_policies",
+		"View compliance": "view_compliance",
+		"Create notices": "create_notices",
+		"Approve notices": "approve_notices",
+		"Manage notices": "manage_notices",
+		"Create quotas": "create_quotas",
+		"Delete quotas": "delete_quotas",
+		"Signoff custom quotas": "signoff_custom_quotas",
+		"View member profiles": "view_member_profiles",
+		"Edit member details": "edit_member_details",
+		"Record notices": "record_notices",
+		"Activity adjustments": "activity_adjustments",
+		"View logbook": "view_logbook",
+		"Logbook redact": "logbook_redact",
+		"Logbook note": "logbook_note",
+		"Logbook warning": "logbook_warning",
+		"Logbook promotion": "logbook_promotion",
+		"Logbook demotion": "logbook_demotion",
+		"Logbook termination": "logbook_termination",
+		"Logbook resignation": "logbook_resignation",
+		"Rank users": "rank_users",
+		"Create alliances": "create_alliances",
+		"Delete alliances": "delete_alliances",
+		"Represent alliance": "represent_alliance",
+		"Edit alliance details": "edit_alliance_details",
+		"Add alliance notes": "add_alliance_notes",
+		"Edit alliance notes": "edit_alliance_notes",
+		"Delete alliance notes": "delete_alliance_notes",
+		"Add alliance visits": "add_alliance_visits",
+		"Edit alliance visits": "edit_alliance_visits",
+		"Delete alliance visits": "delete_alliance_visits",
+		"View moderation": "view_moderation",
+		"Create moderation cases": "create_moderation_cases",
+		"Edit moderation cases": "edit_moderation_cases",
+		"Delete moderation cases": "delete_moderation_cases",
+		"Execute punishments": "execute_punishments",
+		"Revoke punishments": "revoke_punishments",
+		"Upload evidence": "upload_evidence",
+		"Delete evidence": "delete_evidence",
+		"Admin (Manage workspace)": "admin",
+		"Reset activity": "reset_activity",
+		"View audit logs": "view_audit_logs",
+		"Create API keys": "manage_apikeys",
+		"Manage features": "manage_features",
+		"Workspace customisation": "workspace_customisation",
+	};	
+	
+	const membership = user.workspaceMemberships[0];
+	const isAdmin = membership?.isAdmin || false;
+	
+	res.status(200).json({ success: true, permissions: user.roles[0].permissions, workspace: {
+		groupId: Number(workspace.groupId),
+		groupThumbnail: groupLogo,
+		groupName: groupName,
+		yourPermission: isAdmin ? Object.values(permissions) : user.roles[0].permissions,
+		isAdmin,
+		ownerId: workspace.ownerId ? Number(workspace.ownerId) : null,
+		groupTheme: themeconfig,
+		roles: workspace.roles.map(r => ({ ...r, workspaceGroupId: Number(r.workspaceGroupId) })),
+		yourRole: user.roles[0].id,
+		settings: {
+			alliesEnabled: (await getConfig('allies', workspace.groupId))?.enabled || false,
+			policiesEnabled: (await getConfig('policies', workspace.groupId))?.enabled || false,
+			recommendationsEnabled: (await getConfig('recommendations', workspace.groupId))?.enabled || false,
+			moderationEnabled: (await getConfig('moderation', workspace.groupId))?.enabled || false,
+			applicationsEnabled: (await getConfig('applications', workspace.groupId))?.enabled || false,
+			widgets: (await getConfig('home', workspace.groupId))?.widgets || [],
+			layout: (await getConfig('home', workspace.groupId))?.layout || undefined,
+			hideEmpty: (await getConfig('home', workspace.groupId))?.hideIfEmpty || []
+		}
+	} })
+}

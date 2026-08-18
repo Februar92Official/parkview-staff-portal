@@ -1,0 +1,2053 @@
+import React, { useState, useEffect, useRef, useContext, createContext, useId } from "react";
+import {
+  IconX,
+  IconClock,
+  IconNotes,
+  IconHistory,
+  IconSend,
+  IconUserPlus,
+  IconUserMinus,
+  IconUserCheck,
+  IconTag,
+} from "@tabler/icons-react";
+import axios from "axios";
+import { useRouter } from "next/router";
+import toast from "react-hot-toast";
+import { useRecoilValue } from "recoil";
+import { loginState, workspacestate } from "@/state";
+import ReactMarkdown from "react-markdown";
+import rehypeSanitize from "rehype-sanitize";
+import type { SessionColors } from "@/hooks/useSessionColors";
+import { canAssignUsers, canClaimSelf } from "@/utils/sessionPermissions";
+import { Listbox } from "@headlessui/react";
+
+const ActiveEditorContext = createContext<{
+  activeId: string | null;
+  setActiveId: (id: string | null) => void;
+}>({ activeId: null, setActiveId: () => {} });
+
+const isMobile = () => {
+  if (typeof window === "undefined") return false;
+  return window.innerWidth <= 768;
+};
+
+const BG_COLORS = [
+  "bg-amber-200",
+  "bg-red-300",
+  "bg-lime-200",
+  "bg-emerald-300",
+  "bg-rose-200",
+  "bg-green-100",
+  "bg-teal-200",
+  "bg-yellow-200",
+  "bg-red-100",
+  "bg-green-300",
+  "bg-lime-300",
+  "bg-emerald-200",
+  "bg-rose-300",
+  "bg-amber-300",
+  "bg-red-200",
+  "bg-green-200",
+];
+
+function getRandomBg(userid: string, username?: string) {
+  const key = `${userid ?? ""}:${username ?? ""}`;
+  let hash = 5381;
+  for (let i = 0; i < key.length; i++) {
+    hash = ((hash << 5) - hash) ^ key.charCodeAt(i);
+  }
+  const index = (hash >>> 0) % BG_COLORS.length;
+  return BG_COLORS[index];
+}
+
+interface SessionModalProps {
+  session: any;
+  isOpen: boolean;
+  onClose: () => void;
+  onEdit?: (sessionId: string) => void;
+  onDelete: (sessionId: string, deleteAll?: boolean) => void;
+  onUpdate?: () => void;
+  workspaceMembers: any[];
+  canManage: boolean;
+  canAddNotes?: boolean;
+  canEditConcluded?: boolean;
+  sessionColors?: SessionColors;
+  colorsReady?: boolean | undefined;
+  currentUserRankId?: number | null;
+  currentUserRoleIds?: string[];
+}
+
+const SessionModal: React.FC<SessionModalProps> = ({
+  session,
+  isOpen,
+  onClose,
+  onEdit,
+  onDelete,
+  onUpdate,
+  workspaceMembers,
+  canManage,
+  canAddNotes,
+  canEditConcluded,
+  sessionColors,
+  colorsReady,
+  currentUserRankId,
+  currentUserRoleIds = [],
+}) => {
+  const [availableUsers, setAvailableUsers] = useState<any[]>([]);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const [availableTags, setAvailableTags] = useState<any[]>([]);
+  const [templateGroupRoles, setTemplateGroupRoles] = useState<
+    Record<string, number[]>
+  >({});
+  const [templateRoleIds, setTemplateRoleIds] = useState<
+    Record<string, string[]>
+  >({});
+  const [selectedTag, setSelectedTag] = useState<string | null>(
+    session.sessionTagId || null,
+  );
+  const [gameThumbnail, setGameThumbnail] = useState<string | null>(null);
+  const [activeEditorId, setActiveEditorId] = useState<string | null>(null);
+  const router = useRouter();
+  const login = useRecoilValue(loginState);
+  const workspace = useRecoilValue(workspacestate);
+  const workspaceId =
+    (router.query.id as string) ||
+    (workspace?.groupId ? String(workspace.groupId) : "");
+
+  const getAvatarUrlForUser = (
+    userId?: string | null,
+    picture?: string | null,
+  ) => {
+    if (picture) return picture;
+    if (!userId || !workspaceId) return "/default-avatar.jpg";
+    return `/api/workspace/${workspaceId}/avatar/${userId}`;
+  };
+
+  const normalizeUser = (userLike: any) => {
+    const userId =
+      userLike?.userid?.toString?.() ||
+      userLike?.userId?.toString?.() ||
+      userLike?.id?.toString?.();
+    if (!userId) return null;
+
+    const username =
+      userLike?.username || userLike?.user?.username || `User ${userId}`;
+
+    return {
+      ...userLike,
+      userid: userId,
+      username,
+      picture: getAvatarUrlForUser(
+        userId,
+        userLike?.picture || userLike?.user?.picture || null,
+      ),
+    };
+  };
+
+  const defaultColors: SessionColors = {
+    recurring: "bg-blue-500",
+    shift: "bg-green-500",
+    training: "bg-yellow-500",
+    event: "bg-purple-500",
+    other: "bg-zinc-500",
+  };
+
+  const effectiveColors: SessionColors = sessionColors || defaultColors;
+
+  const getSessionTypeColor = (sessionType: string | null | undefined) => {
+    if (!sessionType) return effectiveColors.other;
+    const type = sessionType.toLowerCase();
+    if (type === "shift") return effectiveColors.shift;
+    if (type === "training") return effectiveColors.training;
+    if (type === "event") return effectiveColors.event;
+    return effectiveColors.other;
+  };
+
+  const getRecurringColor = () => {
+    return effectiveColors.recurring;
+  };
+
+  const getTextColorForBackground = (bgColor: string) => {
+    if (bgColor.includes("yellow") || bgColor.includes("orange-400")) {
+      return "text-zinc-800 dark:text-zinc-900";
+    }
+    return "text-white";
+  };
+
+  const refreshSessionData = async () => {
+    onUpdate?.();
+    setRefreshKey((prev) => prev + 1);
+  };
+
+  useEffect(() => {
+    if (isOpen && session) {
+      const merged = new Map<string, any>();
+
+      for (const member of workspaceMembers || []) {
+        const normalized = normalizeUser(member);
+        if (!normalized) continue;
+        merged.set(normalized.userid, normalized);
+      }
+
+      const ownerNormalized = normalizeUser(session.owner);
+      if (ownerNormalized) {
+        merged.set(ownerNormalized.userid, ownerNormalized);
+      } else if (session.ownerId) {
+        const ownerId = session.ownerId.toString();
+        if (!merged.has(ownerId)) {
+          merged.set(ownerId, {
+            userid: ownerId,
+            username: `User ${ownerId}`,
+            picture: getAvatarUrlForUser(ownerId, null),
+          });
+        }
+      }
+
+      for (const assigned of session.users || []) {
+        const normalized = normalizeUser(assigned?.user || assigned);
+        if (!normalized) continue;
+        merged.set(normalized.userid, normalized);
+      }
+
+      setAvailableUsers(Array.from(merged.values()));
+    }
+  }, [isOpen, session, workspaceMembers, login.userId, workspaceId]);
+
+  useEffect(() => {
+    const fetchTags = async () => {
+      try {
+        const res = await axios.get(
+          `/api/workspace/${router.query.id}/settings/activity/session-tags`,
+        );
+        if (res.data.tags) {
+          setAvailableTags(res.data.tags);
+        }
+      } catch (error) {
+        console.error("Failed to fetch tags:", error);
+      }
+    };
+
+    if (isOpen && router.query.id) {
+      fetchTags();
+    }
+  }, [isOpen, router.query.id]);
+
+  useEffect(() => {
+    const fetchTemplateGroupRoles = async () => {
+      try {
+        const res = await axios.get(
+          `/api/workspace/${router.query.id}/settings/sessions/rtemplates`,
+        );
+        const templates: any[] = res.data?.templates || [];
+        const map: Record<string, number[]> = {};
+        const roleMap: Record<string, string[]> = {};
+        for (const t of templates) {
+          if (!t?.id) continue;
+          const source = Array.isArray(t.expandedGroupRoles)
+            ? t.expandedGroupRoles
+            : Array.isArray(t.groupRoles)
+              ? t.groupRoles
+              : [];
+          const ids = source
+            .map((v: any) => Number(v))
+            .filter((n: number) => Number.isFinite(n));
+          map[t.id] = ids;
+          roleMap[t.id] = Array.isArray(t.eligibleRoleIds)
+            ? t.eligibleRoleIds.filter((s: any) => typeof s === "string")
+            : [];
+        }
+        setTemplateGroupRoles(map);
+        setTemplateRoleIds(roleMap);
+      } catch (error) {
+        console.error("Failed to fetch role templates:", error);
+      }
+    };
+
+    if (isOpen && router.query.id) {
+      fetchTemplateGroupRoles();
+    }
+  }, [isOpen, router.query.id]);
+
+  useEffect(() => {
+    setSelectedTag(session.sessionTagId || null);
+  }, [session.sessionTagId]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    setGameThumbnail(null);
+    const placeId = session.sessionType?.gameId;
+    if (!placeId || !workspaceId) return;
+    let cancelled = false;
+    axios
+      .get(
+        `/api/workspace/${workspaceId}/sessions/game-thumbnail?placeId=${placeId}`,
+      )
+      .then((res) => {
+        if (!cancelled) setGameThumbnail(res.data?.thumbnailUrl || null);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, session.sessionType?.gameId, workspaceId]);
+
+  const handleTagAssignment = async (tagId: string | null) => {
+    try {
+      setIsSubmitting(true);
+      const res = await axios.post(
+        `/api/workspace/${router.query.id}/sessions/manage/${session.scheduleId}/update-tag`,
+        {
+          sessionId: session.id,
+          sessionTagId: tagId,
+        },
+      );
+
+      if (res.data.success) {
+        setSelectedTag(tagId);
+        toast.success(
+          tagId ? "Tag assigned successfully" : "Tag removed successfully",
+        );
+        refreshSessionData();
+      }
+    } catch (error: any) {
+      console.error("Failed to update tag:", error);
+      toast.error(error.response?.data?.error || "Failed to update tag");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleHostClaim = async (username: string) => {
+    const userHasAssignPermission = canAssignUsers(
+      workspace.yourPermission,
+      session.type,
+    );
+    const userHasClaimPermission = canClaimSelf(
+      workspace.yourPermission,
+      session.type,
+    );
+    const isAssigningToSelf =
+      username.toLowerCase() === login.username.toLowerCase();
+    const isRemovingSelf =
+      !username.trim() &&
+      session.owner?.username?.toLowerCase() === login.username.toLowerCase();
+    const isRemovingOther =
+      !username.trim() &&
+      session.owner?.username?.toLowerCase() !== login.username.toLowerCase();
+
+    if (username.trim()) {
+      if (isAssigningToSelf) {
+        if (!userHasClaimPermission) return;
+      } else {
+        if (!userHasAssignPermission) return;
+      }
+    } else {
+      if (isRemovingOther && !userHasAssignPermission) return;
+      if (isRemovingSelf && !userHasClaimPermission && !userHasAssignPermission)
+        return;
+    }
+
+    try {
+      setIsSubmitting(true);
+      const user = username.trim()
+        ? availableUsers.find(
+            (u) => u.username.toLowerCase() === username.toLowerCase(),
+          )
+        : null;
+
+      if (username.trim() && !user) {
+        toast.error(`User "${username}" not found in workspace`);
+        return;
+      }
+
+      await axios.put(
+        `/api/workspace/${router.query.id}/sessions/${session.id}/update-host`,
+        {
+          ownerId: user ? user.userid : null,
+        },
+      );
+
+      await axios.post(
+        `/api/workspace/${router.query.id}/sessions/${session.id}/logs`,
+        {
+          action: username.trim() ? "host_assigned" : "host_unassigned",
+          targetId: user ? user.userid : session.ownerId,
+          metadata: {},
+        },
+      );
+
+      toast.success(
+        username.trim()
+          ? "Host assigned successfully"
+          : "Host unassigned successfully",
+      );
+      refreshSessionData();
+
+      session.owner = user || null;
+      session.ownerId = user ? user.userid : null;
+    } catch (error: any) {
+      console.error("Host claim error:", error);
+      toast.error(
+        error?.response?.data?.error || "Failed to update host assignment",
+      );
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleSlotClaim = async (
+    roleId: string,
+    slot: number,
+    username: string,
+  ) => {
+    const userHasAssignPermission = canAssignUsers(
+      workspace.yourPermission,
+      session.type,
+    );
+    const userHasClaimPermission = canClaimSelf(
+      workspace.yourPermission,
+      session.type,
+    );
+    const isAssigningToSelf =
+      username.toLowerCase() === login.username.toLowerCase();
+
+    const currentAssignment = session.users?.find(
+      (u: any) => u.roleID === roleId && u.slot === slot,
+    );
+    const assignedUser = currentAssignment
+      ? availableUsers.find(
+          (user: any) => user.userid === currentAssignment.userid.toString(),
+        )
+      : null;
+
+    const isRemovingSelf =
+      !username.trim() &&
+      assignedUser?.username?.toLowerCase() === login.username.toLowerCase();
+    const isRemovingOther =
+      !username.trim() &&
+      assignedUser?.username?.toLowerCase() !== login.username.toLowerCase();
+
+    if (username.trim()) {
+      if (isAssigningToSelf) {
+        if (!userHasClaimPermission) return;
+      } else {
+        if (!userHasAssignPermission) return;
+      }
+    } else {
+      if (isRemovingOther && !userHasAssignPermission) return;
+      if (isRemovingSelf && !userHasClaimPermission && !userHasAssignPermission)
+        return;
+    }
+
+    try {
+      setIsSubmitting(true);
+
+      if (username.trim()) {
+        const user = availableUsers.find(
+          (u) => u.username.toLowerCase() === username.toLowerCase(),
+        );
+
+        if (!user) {
+          toast.error(`User "${username}" not found in workspace`);
+          return;
+        }
+
+        const roleSlot = session.sessionType.slots?.find(
+          (s: any) => s.id === roleId,
+        );
+
+        const slotGroupRoles: number[] = Array.isArray(roleSlot?.groupRoles)
+          ? roleSlot.groupRoles.map(Number)
+          : [];
+        const effectiveSlotGroupRoles: number[] =
+          slotGroupRoles.length > 0
+            ? slotGroupRoles
+            : roleId && templateGroupRoles[roleId]
+              ? templateGroupRoles[roleId]
+              : [];
+        const effectiveSlotRoleIds: string[] =
+          roleId && templateRoleIds[roleId] ? templateRoleIds[roleId] : [];
+
+        const isSelfUser = user.userid.toString() === login.userId.toString();
+
+        const candidateRankIds: (number | string | null | undefined)[] = [
+          user.rankId,
+          user.roleId,
+          user.groupRankId,
+          user.rank?.id,
+          user.role?.id,
+        ];
+        if (typeof user.rank === "number" || typeof user.rank === "string") {
+          candidateRankIds.push(user.rank);
+        }
+        if (Array.isArray(user.roles)) {
+          for (const r of user.roles) {
+            if (r == null) continue;
+            if (typeof r === "object") {
+              candidateRankIds.push(r.id ?? r.rankId ?? r.roleId);
+            } else {
+              candidateRankIds.push(r);
+            }
+          }
+        }
+        if (isSelfUser && currentUserRankId != null) {
+          candidateRankIds.push(currentUserRankId);
+        }
+        const numericRankIds = candidateRankIds
+          .map((v) => (v == null ? NaN : Number(v)))
+          .filter((n) => Number.isFinite(n));
+
+        const userRoleIds: string[] = Array.isArray(user.roleIds)
+          ? user.roleIds.filter((s: any) => typeof s === "string")
+          : [];
+        if (isSelfUser) {
+          for (const rid of currentUserRoleIds) userRoleIds.push(rid);
+        }
+
+        const noRestriction =
+          effectiveSlotGroupRoles.length === 0 &&
+          effectiveSlotRoleIds.length === 0;
+        const isEligible =
+          noRestriction ||
+          numericRankIds.some((r) => effectiveSlotGroupRoles.includes(r)) ||
+          userRoleIds.some((r) => effectiveSlotRoleIds.includes(r));
+
+        if (!isEligible) {
+          toast.error("That user is not eligible for this slot");
+          return;
+        }
+
+        await axios.post(
+          `/api/workspace/${router.query.id}/sessions/${session.id}/claim-role`,
+          {
+            userId: user.userid,
+            roleId,
+            slot,
+            action: "claim",
+          },
+        );
+        await axios.post(
+          `/api/workspace/${router.query.id}/sessions/${session.id}/logs`,
+          {
+            action: "role_assigned",
+            targetId: user.userid,
+            metadata: {
+              roleName: roleSlot?.name || "Unknown Role",
+              slot: slot,
+            },
+          },
+        );
+
+        toast.success("Role assigned successfully");
+      } else {
+        const currentAssignment = session.users?.find(
+          (u: any) => u.roleID === roleId && u.slot === slot,
+        );
+
+        await axios.post(
+          `/api/workspace/${router.query.id}/sessions/${session.id}/claim-role`,
+          {
+            roleId,
+            slot,
+            action: "unclaim",
+          },
+        );
+
+        if (currentAssignment) {
+          const roleSlot = session.sessionType.slots?.find(
+            (s: any) => s.id === roleId,
+          );
+          await axios.post(
+            `/api/workspace/${router.query.id}/sessions/${session.id}/logs`,
+            {
+              action: "role_unassigned",
+              targetId: currentAssignment.userid,
+              metadata: {
+                roleName: roleSlot?.name || "Unknown Role",
+                slot: slot,
+              },
+            },
+          );
+        }
+
+        toast.success("Role unassigned successfully");
+      }
+
+      refreshSessionData();
+    } catch (error: any) {
+      console.error("Role claim error:", error);
+      toast.error(
+        error?.response?.data?.error || "Failed to update role assignment",
+      );
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  if (!isOpen || !session) return null;
+
+  if (colorsReady === false) {
+    return (
+      <div
+        className="fixed inset-0 bg-black/25 flex items-center justify-center z-50 p-2 sm:p-4 overflow-x-hidden"
+        onClick={(e) => {
+          if (e.target === e.currentTarget && !isMobile()) {
+            onClose();
+          }
+        }}
+      >
+        <div className="bg-white dark:bg-zinc-800 rounded-xl shadow-xl w-full max-w-2xl mx-auto p-6 text-center">
+          <div className="text-zinc-700 dark:text-zinc-200">Loading…</div>
+        </div>
+      </div>
+    );
+  }
+
+  const sessionDate = new Date(session.date);
+  const isRecurring = session.scheduleId !== null;
+  const now = new Date();
+  const sessionStart = new Date(session.date);
+  const sessionDuration = session.duration || 30;
+  const sessionEnd = new Date(
+    sessionStart.getTime() + sessionDuration * 60 * 1000,
+  );
+  const isActive = now >= sessionStart && now <= sessionEnd;
+  const isConcluded = now > sessionEnd;
+
+  const getCurrentStatus = () => {
+    if (isConcluded) return "Concluded";
+
+    const minutesFromStart =
+      (now.getTime() - sessionStart.getTime()) / 1000 / 60;
+    const statues = (session.sessionType as any)?.statues || [];
+
+    const sortedStatues = [...statues].sort(
+      (a: any, b: any) => b.timeAfter - a.timeAfter,
+    );
+    for (const status of sortedStatues) {
+      if (minutesFromStart >= status.timeAfter) {
+        return status.name;
+      }
+    }
+    return null;
+  };
+
+  const currentStatus = getCurrentStatus();
+  const getAvatarFallback = (
+    userId?: string | null,
+    picture?: string | null,
+  ) => {
+    return getAvatarUrlForUser(userId, picture);
+  };
+
+  const getAssignedDisplay = (assignedUser: any) => {
+    if (!assignedUser) {
+      return {
+        username: "",
+        picture: null as string | null,
+        userId: undefined as string | undefined,
+      };
+    }
+
+    const assignedUserId = assignedUser.userid?.toString();
+    const workspaceMember = availableUsers.find(
+      (user: any) => user.userid?.toString() === assignedUserId,
+    );
+
+    const username =
+      workspaceMember?.username ||
+      assignedUser.user?.username ||
+      (assignedUserId ? `User ${assignedUserId}` : "");
+
+    const picture =
+      workspaceMember?.picture ||
+      assignedUser.user?.picture ||
+      getAvatarFallback(assignedUserId, null) ||
+      null;
+
+    return { username, picture, userId: assignedUserId };
+  };
+
+  return (
+    <div
+      className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center"
+      onClick={(e) => {
+        if (e.target === e.currentTarget && !isMobile()) {
+          onClose();
+        }
+      }}
+    >
+      <div
+        className="bg-white dark:bg-zinc-900 rounded-none sm:rounded-xl shadow-2xl w-full max-w-3xl overflow-x-hidden fixed top-12 bottom-16 left-0 right-0 sm:relative sm:inset-auto sm:h-auto sm:max-h-[90vh] sm:mx-4 lg:mx-auto"
+        style={{ overflowY: "overlay" as any }}
+      >
+        <div className="relative h-44 sm:h-52 overflow-hidden rounded-t-none sm:rounded-t-xl flex-shrink-0">
+          <div className="absolute inset-0 bg-zinc-800" />
+          {gameThumbnail && (
+            <div
+              className="absolute inset-0 bg-cover bg-center scale-105 transition-opacity duration-500"
+              style={{ backgroundImage: `url(${gameThumbnail})` }}
+            />
+          )}
+          <div className="absolute inset-0 backdrop-blur-[2px] bg-black/50" />
+          <div className="absolute inset-0 bg-gradient-to-t from-black/85 via-black/30 to-transparent" />
+          <div className="absolute top-3 left-3 right-3 flex items-start justify-between">
+            <div className="flex flex-wrap gap-1.5">
+              {session.type && (
+                <span
+                  className={`${getSessionTypeColor(session.type)} ${getTextColorForBackground(getSessionTypeColor(session.type))} px-2.5 py-1 rounded text-xs font-semibold shadow`}
+                >
+                  {session.type.charAt(0).toUpperCase() + session.type.slice(1)}
+                </span>
+              )}
+              {isRecurring && (
+                <span
+                  className={`${getRecurringColor()} ${getTextColorForBackground(getRecurringColor())} px-2.5 py-1 rounded text-xs font-semibold shadow`}
+                >
+                  Recurring
+                </span>
+              )}
+              {isActive && (
+                <span className="bg-emerald-500 text-white px-2.5 py-1 rounded text-xs font-semibold shadow animate-pulse">
+                  • LIVE
+                </span>
+              )}
+              {isConcluded && (
+                <span className="bg-zinc-700/80 text-zinc-200 px-2.5 py-1 rounded text-xs font-semibold shadow">
+                  Concluded
+                </span>
+              )}
+              {!isConcluded && currentStatus && currentStatus !== "Open" && (
+                <span className="bg-blue-500/80 text-white px-2.5 py-1 rounded text-xs font-semibold shadow">
+                  {currentStatus}
+                </span>
+              )}
+            </div>
+            <button
+              onClick={onClose}
+              className="p-1.5 bg-black/35 rounded-full text-white hover:bg-black/60 transition-colors flex-shrink-0"
+            >
+              <IconX className="w-4 h-4" />
+            </button>
+          </div>
+          <div className="absolute bottom-0 left-0 right-0 p-4">
+            <h2 className="text-xl sm:text-2xl font-bold text-white drop-shadow mb-1 leading-tight">
+              {session.name || session.sessionType.name}
+            </h2>
+            <div className="flex items-center gap-1.5 text-sm text-white/75 mb-1">
+              <IconClock className="w-3.5 h-3.5 flex-shrink-0" />
+              <span>
+                {sessionDate.toLocaleDateString()} at{" "}
+                {sessionDate.toLocaleTimeString(undefined, {
+                  hour: "2-digit",
+                  minute: "2-digit",
+                  hour12: true,
+                })}
+              </span>
+            </div>
+            {session.sessionType.description && (
+              <p className="text-white/65 text-sm leading-snug line-clamp-2">
+                {session.sessionType.description
+                  .replace(/[#*`_~[\]]/g, "")
+                  .slice(0, 160)}
+              </p>
+            )}
+          </div>
+        </div>
+
+        <div className="p-4 sm:p-6 space-y-6">
+          <ActiveEditorContext.Provider
+            value={{ activeId: activeEditorId, setActiveId: setActiveEditorId }}
+          >
+          {session.sessionType.slots &&
+            Array.isArray(session.sessionType.slots) &&
+            session.sessionType.slots.length > 0 && (
+              <div>
+                <h3 className="text-sm font-semibold uppercase tracking-wider text-zinc-400 dark:text-zinc-500 mb-3">
+                  Assignments
+                </h3>
+
+                <div className="space-y-3">
+                  {(() => {
+                    const slots: any[] = session.sessionType.slots;
+                    const catMap = new Map<string, any[]>();
+                    const uncategorised: any[] = [];
+                    for (const slot of slots) {
+                      if (typeof slot !== "object") continue;
+                      if (slot.categoryId) {
+                        if (!catMap.has(slot.categoryId))
+                          catMap.set(slot.categoryId, []);
+                        catMap.get(slot.categoryId)!.push(slot);
+                      } else {
+                        uncategorised.push(slot);
+                      }
+                    }
+                    const sortedCategories = [...catMap.entries()]
+                      .map(
+                        ([catId, catSlots]) =>
+                          [
+                            catId,
+                            [...catSlots].sort(
+                              (a, b) => (a.weight ?? 0) - (b.weight ?? 0),
+                            ),
+                          ] as [string, any[]],
+                      )
+                      .sort(
+                        ([, a], [, b]) =>
+                          (a[0]?.categoryWeight ?? 0) -
+                          (b[0]?.categoryWeight ?? 0),
+                      );
+
+                    const renderSlot = (slot: any, slotIdx: number) => {
+                      const slotData = JSON.parse(JSON.stringify(slot));
+                      const rawSlotGroupRoles: number[] = Array.isArray(
+                        slotData.groupRoles,
+                      )
+                        ? slotData.groupRoles
+                            .map((v: any) => Number(v))
+                            .filter((n: number) => Number.isFinite(n))
+                        : [];
+                      const fallbackGroupRoles: number[] =
+                        rawSlotGroupRoles.length === 0 && slotData.id
+                          ? templateGroupRoles[slotData.id] ?? []
+                          : [];
+                      const slotGroupRoles: number[] =
+                        rawSlotGroupRoles.length > 0
+                          ? rawSlotGroupRoles
+                          : fallbackGroupRoles;
+                      const slotRoleIds: string[] = slotData.id
+                        ? templateRoleIds[slotData.id] ?? []
+                        : [];
+                      return (
+                        <div
+                          key={slotIdx}
+                          className="bg-zinc-50 dark:bg-zinc-800/60 rounded-lg p-4 mb-3"
+                        >
+                          <h4 className="text-sm font-medium text-zinc-900 dark:text-white mb-2">
+                            {slotData.name}
+                          </h4>
+                          <div className="space-y-2">
+                            {Array.from(Array(slotData.slots)).map((_, i) => {
+                              const assignedUser = session.users?.find(
+                                (u: any) =>
+                                  u.roleID === slotData.id && u.slot === i,
+                              );
+                              const {
+                                username,
+                                picture: userPicture,
+                                userId: assignedUserId,
+                              } = getAssignedDisplay(assignedUser);
+                              return (
+                                <div
+                                  key={i}
+                                  className="flex flex-col sm:flex-row sm:items-center gap-2"
+                                >
+                                  <span className="text-sm text-zinc-500 dark:text-zinc-400 sm:w-16 sm:flex-shrink-0">
+                                    Slot {i + 1}:
+                                  </span>
+                                  <div className="flex-1 min-w-0">
+                                    <RoleButton
+                                      currentValue={username || ""}
+                                      onValueChange={(value) =>
+                                        handleSlotClaim(slotData.id, i, value)
+                                      }
+                                      isSubmitting={isSubmitting}
+                                      canEdit={
+                                        (!isConcluded || !!canEditConcluded) && //canManage ||
+                                        (canAssignUsers(
+                                          workspace.yourPermission,
+                                          session.type,
+                                        ) ||
+                                          //workspace.yourPermission.includes(
+                                          //  "admin",
+                                          //) ||
+                                          canClaimSelf(
+                                            workspace.yourPermission,
+                                            session.type,
+                                          ))
+                                      }
+                                      availableUsers={availableUsers}
+                                      currentUserId={login.userId}
+                                      currentUserPicture={login.thumbnail}
+                                      currentUserUsername={login.username}
+                                      assignedUserPicture={userPicture}
+                                      assignedUserId={assignedUserId}
+                                      workspace={workspace}
+                                      isHostRole={!!slotData.hostRole}
+                                      sessionType={session.type}
+                                      eligibleGroupRoles={slotGroupRoles}
+                                      eligibleRoleIds={slotRoleIds}
+                                      currentUserRankId={
+                                        currentUserRankId ?? null
+                                      }
+                                      currentUserRoleIds={currentUserRoleIds}
+                                    />
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      );
+                    };
+
+                    return (
+                      <>
+                        {sortedCategories.map(([catId, catSlots]) => (
+                          <div key={catId}>
+                            <div className="flex items-center gap-2 mb-2">
+                              <span className="text-xs font-semibold uppercase tracking-wider text-zinc-400 dark:text-zinc-500">
+                                {catSlots[0]?.categoryName}
+                              </span>
+                              <div className="flex-1 border-t border-zinc-200 dark:border-zinc-700" />
+                            </div>
+                            {catSlots.map((slot, idx) => renderSlot(slot, idx))}
+                          </div>
+                        ))}
+                        {uncategorised.length > 0 && (
+                          <div>
+                            {sortedCategories.length > 0 && (
+                              <div className="flex items-center gap-2 mb-2 mt-1">
+                                <span className="text-xs font-semibold uppercase tracking-wider text-zinc-400 dark:text-zinc-500">
+                                  Other
+                                </span>
+                                <div className="flex-1 border-t border-zinc-200 dark:border-zinc-700" />
+                              </div>
+                            )}
+                            {[...uncategorised]
+                              .sort((a, b) => (a.weight ?? 0) - (b.weight ?? 0))
+                              .map((slot, idx) => renderSlot(slot, idx))}
+                          </div>
+                        )}
+                      </>
+                    );
+                  })()}
+                </div>
+              </div>
+            )}
+
+          {/* Session Tag */}
+          {(() => {
+            const sessionType = session.type || "other";
+            const canAssignTag =
+              (!isConcluded || !!canEditConcluded) && //canManage ||
+              (workspace.isAdmin ||
+                workspace.yourPermission?.includes(
+                  `sessions_${sessionType}_assign_tag`,
+                ) ||
+                workspace.yourPermission?.includes("admin"));
+            if (!canAssignTag) return null;
+
+            return (
+              <div>
+                <h3 className="text-sm font-semibold uppercase tracking-wider text-zinc-400 dark:text-zinc-500 mb-3">
+                  Session Tag
+                </h3>
+                <div className="bg-zinc-50 dark:bg-zinc-800/60 rounded-lg p-4">
+                  <div className="flex items-center gap-3">
+                    <IconTag className="w-5 h-5 text-zinc-500 dark:text-zinc-400" />
+                    <div className="flex-1">
+                      <Listbox
+                        value={selectedTag}
+                        onChange={handleTagAssignment}
+                        disabled={isSubmitting}
+                      >
+                        <div className="relative">
+                          <Listbox.Button className="relative w-full cursor-pointer rounded-lg bg-white dark:bg-zinc-800 py-2 pl-3 pr-10 text-left border border-zinc-300 dark:border-zinc-600 focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent disabled:opacity-50 disabled:cursor-not-allowed">
+                            <span className="block truncate text-zinc-900 dark:text-white">
+                              {selectedTag
+                                ? availableTags.find(
+                                    (t) => t.id === selectedTag,
+                                  )?.name || "Select a tag"
+                                : "No tag"}
+                            </span>
+                            {selectedTag && (
+                              <span className="absolute inset-y-0 right-10 flex items-center pr-2">
+                                <span
+                                  className={`w-3 h-3 rounded-full ${
+                                    availableTags.find(
+                                      (t) => t.id === selectedTag,
+                                    )?.color || "bg-zinc-300"
+                                  }`}
+                                />
+                              </span>
+                            )}
+                          </Listbox.Button>
+                          <Listbox.Options className="absolute z-10 mt-1 max-h-60 w-full overflow-auto rounded-lg bg-white dark:bg-zinc-800 py-1 text-base shadow-lg ring-1 ring-black ring-opacity-5 focus:outline-none">
+                            <Listbox.Option
+                              value={null}
+                              className={({ active }) =>
+                                `relative cursor-pointer select-none py-2 pl-10 pr-4 ${
+                                  active
+                                    ? "bg-primary/10 text-primary"
+                                    : "text-zinc-900 dark:text-white"
+                                }`
+                              }
+                            >
+                              {({ selected }) => (
+                                <>
+                                  <span
+                                    className={`block truncate dark:text-white ${selected ? "font-medium" : "font-normal"}`}
+                                  >
+                                    No tag
+                                  </span>
+                                  {selected && (
+                                    <span className="absolute inset-y-0 left-0 flex items-center pl-3 text-primary dark:text-white">
+                                      <IconUserCheck className="w-5 h-5" />
+                                    </span>
+                                  )}
+                                </>
+                              )}
+                            </Listbox.Option>
+                            {availableTags
+                              .filter(
+                                (tag) =>
+                                  !tag.allowedTypes?.length ||
+                                  tag.allowedTypes.includes(
+                                    session.type || "other",
+                                  ),
+                              )
+                              .map((tag) => (
+                                <Listbox.Option
+                                  key={tag.id}
+                                  value={tag.id}
+                                  className={({ active }) =>
+                                    `relative cursor-pointer select-none py-2 pl-10 pr-4 ${
+                                      active
+                                        ? "bg-primary/10 text-primary"
+                                        : "text-zinc-900 dark:text-white"
+                                    }`
+                                  }
+                                >
+                                  {({ selected }) => (
+                                    <>
+                                      <div className="flex items-center gap-2">
+                                        <span
+                                          className={`w-3 h-3 rounded-full ${tag.color}`}
+                                        />
+                                        <span
+                                          className={`block truncate dark:text-white ${selected ? "font-medium" : "font-normal"}`}
+                                        >
+                                          {tag.name}
+                                        </span>
+                                      </div>
+                                      {selected && (
+                                        <span className="absolute inset-y-0 left-0 flex items-center pl-3 text-primary">
+                                          <IconUserCheck className="w-5 h-5" />
+                                        </span>
+                                      )}
+                                    </>
+                                  )}
+                                </Listbox.Option>
+                              ))}
+                          </Listbox.Options>
+                        </div>
+                      </Listbox>
+                    </div>
+                  </div>
+                  <p className="mt-2 text-sm text-zinc-500 dark:text-zinc-400">
+                    Assign a tag to categorise this session
+                  </p>
+                </div>
+              </div>
+            );
+          })()}
+
+          <NotesSection
+            sessionId={session.id}
+            canManage={
+              (canAddNotes ?? canManage) && (!isConcluded || !!canEditConcluded)
+            }
+            currentUser={login}
+            refreshKey={refreshKey}
+            onDataChange={refreshSessionData}
+          />
+
+          <ActivityLogsSection sessionId={session.id} refreshKey={refreshKey} />
+          </ActiveEditorContext.Provider>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const AutocompleteInput: React.FC<{
+  currentValue: string;
+  onValueChange: (value: string) => void;
+  isSubmitting: boolean;
+  canEdit: boolean;
+  availableUsers: any[];
+  sessionType: string;
+  currentUserId: number;
+  currentUserPicture?: string;
+  currentUserUsername?: string;
+  placeholder?: string;
+  assignedUserPicture?: string;
+  assignedUserId?: string;
+  isHostRole?: boolean;
+  workspace?: any;
+  canRemove?: boolean;
+  eligibleGroupRoles?: number[];
+  eligibleRoleIds?: string[];
+  currentUserRankId?: number | null;
+  currentUserRoleIds?: string[];
+}> = ({
+  currentValue,
+  onValueChange,
+  isSubmitting,
+  canEdit,
+  availableUsers,
+  currentUserId,
+  currentUserPicture,
+  currentUserUsername,
+  placeholder = "Enter username",
+  assignedUserPicture,
+  assignedUserId,
+  isHostRole = false,
+  workspace,
+  canRemove = true,
+  sessionType,
+  eligibleGroupRoles = [],
+  eligibleRoleIds = [],
+  currentUserRankId = null,
+  currentUserRoleIds = [],
+}) => {
+  const [isEditing, setIsEditing] = useState(false);
+  const editorId = useId();
+  const { activeId, setActiveId } = useContext(ActiveEditorContext);
+  const [inputValue, setInputValue] = useState(currentValue);
+  const [filteredUsers, setFilteredUsers] = useState<any[]>([]);
+  const [showSuggestions, setShowSuggestions] = useState(false);
+  const [selectedIndex, setSelectedIndex] = useState(-1);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const suggestionRefs = useRef<(HTMLDivElement | null)[]>([]);
+  const hasRoleRestriction =
+    eligibleGroupRoles.length > 0 || eligibleRoleIds.length > 0;
+
+  const isAdmin = workspace?.yourPermission?.includes("admin");
+
+  const hasAssignPermission = canAssignUsers(
+    workspace?.yourPermission || [],
+    sessionType,
+  ); //|| isAdmin;
+
+  const hasClaimPermission = canClaimSelf(
+    workspace?.yourPermission || [],
+    sessionType,
+  ); //|| isAdmin;
+
+  const resolveUserRankIds = (user: any): number[] => {
+    if (!user) return [];
+    const ids: (number | string | null | undefined)[] = [];
+
+    ids.push(user.rankId, user.roleId, user.groupRankId);
+    ids.push(user.rank?.id, user.role?.id);
+    if (typeof user.rank === "number" || typeof user.rank === "string") {
+      ids.push(user.rank);
+    }
+    if (Array.isArray(user.roles)) {
+      for (const r of user.roles) {
+        if (r == null) continue;
+        if (typeof r === "object") ids.push(r.id ?? r.rankId ?? r.roleId);
+        else ids.push(r);
+      }
+    }
+
+    return ids
+      .map((v) => (v == null ? NaN : Number(v)))
+      .filter((n) => Number.isFinite(n));
+  };
+
+  const userIsEligibleForSlot = (user: any) => {
+    if (!eligibleGroupRoles.length && !eligibleRoleIds.length) return true;
+
+    const isSelf =
+      user?.userid?.toString?.() === currentUserId.toString() || user?.isSelf;
+    const ranks = resolveUserRankIds(user);
+    if (isSelf && currentUserRankId != null) {
+      ranks.push(Number(currentUserRankId));
+    }
+    if (ranks.some((r) => eligibleGroupRoles.includes(r))) return true;
+
+    const userRoleIds: string[] = Array.isArray(user?.roleIds)
+      ? user.roleIds.filter((s: any) => typeof s === "string")
+      : [];
+    if (isSelf) {
+      for (const rid of currentUserRoleIds) userRoleIds.push(rid);
+    }
+    return userRoleIds.some((r) => eligibleRoleIds.includes(r));
+  };
+
+  const selfMember = availableUsers.find(
+    (u) => u?.userid?.toString?.() === currentUserId.toString(),
+  );
+  const selfRanks: number[] = [];
+  if (currentUserRankId != null) selfRanks.push(Number(currentUserRankId));
+  if (selfMember) selfRanks.push(...resolveUserRankIds(selfMember));
+
+  const selfRoleIds: string[] = [...currentUserRoleIds];
+  if (selfMember && Array.isArray(selfMember.roleIds)) {
+    for (const rid of selfMember.roleIds) {
+      if (typeof rid === "string") selfRoleIds.push(rid);
+    }
+  }
+
+  const currentUserEligible =
+    (eligibleGroupRoles.length === 0 && eligibleRoleIds.length === 0) ||
+    selfRanks.some((r) => eligibleGroupRoles.includes(r)) ||
+    selfRoleIds.some((r) => eligibleRoleIds.includes(r));
+
+  const canAssignToUser = (targetUser: any) => {
+    if (!targetUser) return false;
+
+    const isSelf = targetUser.userid.toString() === currentUserId.toString();
+
+    if (isSelf) {
+      return hasClaimPermission && currentUserEligible;
+    }
+
+    return hasAssignPermission && userIsEligibleForSlot(targetUser);
+  };
+
+  const hasPermissionToEdit = () => {
+    if (!workspace) return canEdit;
+    const hasAssignPermission = canAssignUsers(
+      workspace.yourPermission,
+      sessionType,
+    ); //||
+    //workspace.yourPermission.includes("admin");
+    const hasClaimPermission = canClaimSelf(
+      workspace.yourPermission,
+      sessionType,
+    ); //||
+    //workspace.yourPermission.includes("admin");
+
+    return hasAssignPermission || hasClaimPermission;
+  };
+
+  const actualCanEdit = canEdit && hasPermissionToEdit();
+
+  const currentUserOption = currentUserUsername
+    ? {
+        userid: currentUserId.toString(),
+        username: currentUserUsername,
+        picture: currentUserPicture || "/default-avatar.jpg",
+        rankId: currentUserRankId,
+        isSelf: true,
+      }
+    : null;
+
+  const allAssignableUsers = currentUserOption
+    ? [
+        currentUserOption,
+        ...availableUsers.filter(
+          (user) => user.userid.toString() !== currentUserId.toString(),
+        ),
+      ]
+    : availableUsers;
+
+  useEffect(() => {
+    setInputValue(currentValue);
+  }, [currentValue]);
+
+  useEffect(() => {
+    if (isEditing && activeId && activeId !== editorId) {
+      setInputValue(currentValue);
+      setIsEditing(false);
+      setShowSuggestions(false);
+      setSelectedIndex(-1);
+    }
+  }, [activeId, editorId, isEditing, currentValue]);
+
+  useEffect(() => {
+    const userHasAssignPermission =
+      canAssignUsers(workspace?.yourPermission || [], sessionType) ||
+      //workspace?.yourPermission?.includes("admin") ||
+      false;
+    const userHasClaimPermission = canClaimSelf(
+      workspace.yourPermission,
+      sessionType,
+    ); //||
+    //workspace.yourPermission.includes("admin");
+    let usersForSuggestions = allAssignableUsers.filter((user) =>
+      canAssignToUser(user),
+    );
+
+    let suggestions = [];
+    if (assignedUserId && currentValue.trim() !== "") {
+      const assignedUser = allAssignableUsers.find(
+        (user) => user.userid.toString() === assignedUserId,
+      );
+      if (assignedUser) {
+        suggestions.push({
+          ...assignedUser,
+          isSelf: assignedUser.userid.toString() === currentUserId.toString(),
+          isCurrentlyAssigned: true,
+        });
+      }
+    }
+
+    if (inputValue.trim() === "") {
+      const isCurrentUserAssigned = assignedUserId === currentUserId.toString();
+      if (
+        currentUserUsername &&
+        !isCurrentUserAssigned &&
+        hasClaimPermission &&
+        currentUserEligible
+      ) {
+        suggestions.push({
+          userid: currentUserId.toString(),
+          username: currentUserUsername,
+          picture: currentUserPicture || "/default-avatar.jpg",
+          rankId: currentUserRankId,
+          isSelf: true,
+        });
+      }
+
+      const otherUsers = usersForSuggestions.filter(
+        (user) =>
+          user.userid.toString() !== currentUserId.toString() &&
+          user.userid.toString() !== assignedUserId,
+      );
+
+      suggestions.push(...otherUsers.slice(0, 7));
+    } else {
+      const filtered = usersForSuggestions
+        .filter((user) => {
+          const matchesInput = user.username
+            .toLowerCase()
+            .includes(inputValue.toLowerCase());
+          const isAssigned = user.userid.toString() === assignedUserId;
+          return (matchesInput || isAssigned) && canAssignToUser(user);
+        })
+        .map((user) => ({
+          ...user,
+          isSelf: user.userid.toString() === currentUserId.toString(),
+          isCurrentlyAssigned: user.userid.toString() === assignedUserId,
+        }))
+        .slice(0, 8);
+      suggestions = suggestions.filter(
+        (existing) => !filtered.some((user) => user.userid === existing.userid),
+      );
+      suggestions.push(...filtered);
+    }
+
+    setFilteredUsers(suggestions);
+  }, [
+    inputValue,
+    availableUsers,
+    allAssignableUsers,
+    currentUserId,
+    currentUserUsername,
+    currentUserPicture,
+    assignedUserId,
+    currentValue,
+    workspace,
+    currentUserEligible,
+  ]);
+
+  const canAssignToUsername = (targetUsername: string) => {
+    const targetUser = allAssignableUsers.find(
+      (user) => user.username.toLowerCase() === targetUsername.toLowerCase(),
+    );
+
+    return canAssignToUser(targetUser);
+  };
+
+  const handleSubmit = () => {
+    if (inputValue.trim() === "" || canAssignToUsername(inputValue)) {
+      onValueChange(inputValue);
+    } else {
+      setInputValue(currentValue);
+    }
+    setIsEditing(false);
+    setShowSuggestions(false);
+    setSelectedIndex(-1);
+    if (activeId === editorId) setActiveId(null);
+  };
+
+  const handleCancel = () => {
+    setInputValue(currentValue);
+    setIsEditing(false);
+    setShowSuggestions(false);
+    setSelectedIndex(-1);
+    if (activeId === editorId) setActiveId(null);
+  };
+
+  const handleUserSelect = (user: any) => {
+    if (canAssignToUser(user)) {
+      setInputValue(user.username);
+      onValueChange(user.username);
+      setIsEditing(false);
+    } else {
+      setInputValue(currentValue);
+      setIsEditing(false);
+    }
+    setShowSuggestions(false);
+    setSelectedIndex(-1);
+    if (activeId === editorId) setActiveId(null);
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setSelectedIndex((prev) => Math.min(prev + 1, filteredUsers.length - 1));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setSelectedIndex((prev) => Math.max(prev - 1, -1));
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      if (selectedIndex >= 0 && filteredUsers[selectedIndex]) {
+        handleUserSelect(filteredUsers[selectedIndex]);
+      } else {
+        handleSubmit();
+      }
+    } else if (e.key === "Escape") {
+      handleCancel();
+    }
+  };
+
+  const handleInputFocus = () => {
+    setShowSuggestions(true);
+  };
+
+  const handleInputBlur = (e: React.FocusEvent) => {
+    const current = e.currentTarget;
+    const related = (e.relatedTarget as Node) || null;
+    setTimeout(() => {
+      try {
+        if (!current || (related && !current.contains(related))) {
+          setShowSuggestions(false);
+          setSelectedIndex(-1);
+        }
+      } catch (err) {
+        setShowSuggestions(false);
+        setSelectedIndex(-1);
+      }
+    }, 150);
+  };
+
+  if (!actualCanEdit) {
+    return (
+      <div className="flex items-center gap-2 px-4 py-2 bg-zinc-100 dark:bg-zinc-700 rounded-lg">
+        {currentValue && assignedUserPicture && assignedUserId && (
+          <div
+            className={`w-6 h-6 rounded-full flex items-center justify-center ${getRandomBg(
+              assignedUserId,
+            )}`}
+          >
+            <img
+              src={assignedUserPicture || "/default-avatar.jpg"}
+              alt={currentValue}
+              className="w-6 h-6 rounded-full object-cover"
+              onError={(e) => {
+                e.currentTarget.src = "/default-avatar.jpg";
+              }}
+            />
+          </div>
+        )}
+        <span className="text-zinc-700 dark:text-white">
+          {currentValue || "No assignment"}
+        </span>
+      </div>
+    );
+  }
+
+  if (isEditing) {
+    return (
+      <div className="relative">
+        <div className="flex flex-col sm:flex-row sm:items-center gap-2">
+          <div className="relative flex-1">
+            <input
+              ref={inputRef}
+              type="text"
+              value={inputValue}
+              onChange={(e) => setInputValue(e.target.value)}
+              onKeyDown={handleKeyDown}
+              onFocus={handleInputFocus}
+              onBlur={handleInputBlur}
+              placeholder={placeholder}
+              className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-1 focus:ring-primary dark:bg-zinc-700 dark:border-zinc-600 dark:text-white"
+              disabled={isSubmitting}
+              autoComplete="off"
+              autoFocus
+            />
+
+            {showSuggestions && filteredUsers.length > 0 && (
+              <div className="absolute z-50 w-full mt-1 bg-white dark:bg-zinc-800 border border-gray-300 dark:border-zinc-600 rounded-md shadow-lg max-h-60 overflow-y-auto">
+                {filteredUsers.map((user, index) => (
+                  <div
+                    key={user.userid}
+                    ref={(el) => {
+                      suggestionRefs.current[index] = el;
+                    }}
+                    className={`flex items-center gap-3 px-3 py-2 cursor-pointer hover:bg-zinc-50 dark:hover:bg-zinc-700 ${
+                      selectedIndex === index
+                        ? "bg-zinc-50 dark:bg-zinc-700"
+                        : ""
+                    }`}
+                    onClick={() => handleUserSelect(user)}
+                  >
+                    <img
+                      src={user.picture || "/default-avatar.jpg"}
+                      alt={user.username}
+                      className="w-8 h-8 rounded-full"
+                      onError={(e) => {
+                        e.currentTarget.src = "/default-avatar.jpg";
+                      }}
+                    />
+                    <div className="flex-1">
+                      <div className="text-sm font-medium text-zinc-900 dark:text-white">
+                        {user.username}
+                        {user.isSelf && (
+                          <span className="ml-2 text-xs bg-primary/10 text-primary px-2 py-0.5 rounded">
+                            You
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                    {user.isSelf && (
+                      <span className="text-xs text-zinc-500 dark:text-zinc-400">
+                        Claim
+                      </span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+          <div className="flex gap-2 sm:flex-shrink-0">
+            <button
+              onClick={handleSubmit}
+              disabled={isSubmitting}
+              className="flex-1 sm:flex-none px-3 py-2 text-sm bg-primary text-white rounded-md hover:bg-primary/90 disabled:opacity-50"
+            >
+              Save
+            </button>
+            <button
+              onClick={handleCancel}
+              disabled={isSubmitting}
+              className="flex-1 sm:flex-none px-3 py-2 text-sm bg-zinc-500 text-white rounded-md hover:bg-zinc-600 disabled:opacity-50"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      role="button"
+      tabIndex={0}
+      onKeyDown={(e) => {
+        if (
+          (e.key === "Enter" || e.key === " ") &&
+          !isSubmitting &&
+          actualCanEdit
+        ) {
+          setIsEditing(true);
+          setActiveId(editorId);
+        }
+      }}
+      onClick={() => {
+        if (!isSubmitting && actualCanEdit) {
+          setIsEditing(true);
+          setActiveId(editorId);
+        }
+      }}
+      className="w-full px-4 py-2 text-left bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-600 rounded-lg hover:bg-zinc-50 dark:hover:bg-zinc-700 transition-colors disabled:opacity-50 outline-none"
+    >
+      <div className="flex items-center gap-2 w-full">
+        <div className="flex items-center flex-1">
+          {currentValue && assignedUserPicture && assignedUserId && (
+            <div
+              className={`w-6 h-6 rounded-full flex items-center justify-center ${getRandomBg(
+                assignedUserId,
+              )}`}
+            >
+              <img
+                src={assignedUserPicture || "/default-avatar.jpg"}
+                alt={currentValue}
+                className="w-6 h-6 rounded-full object-cover"
+                onError={(e) => {
+                  e.currentTarget.src = "/default-avatar.jpg";
+                }}
+              />
+            </div>
+          )}
+          <span className="text-zinc-700 dark:text-white ml-2">
+            {currentValue || "Unclaimed"}
+          </span>
+        </div>
+
+        {currentValue && canRemove && (
+          <span
+            role="button"
+            title="Remove assignment"
+            onClick={(e) => {
+              e.stopPropagation();
+              if (!isSubmitting && actualCanEdit) {
+                const canRemoveAssignment = () => {
+                  if (!workspace) return true;
+
+                  const hasAssignPermission = canAssignUsers(
+                    workspace.yourPermission,
+                    sessionType,
+                  ); //||
+                  //workspace.yourPermission.includes("admin");
+                  const isAssignedToSelf =
+                    assignedUserId?.toString() === currentUserId.toString();
+
+                  const hasClaimPermission = canClaimSelf(
+                    workspace.yourPermission,
+                    sessionType,
+                  ); //||
+                  //workspace.yourPermission.includes("admin");
+                  return (
+                    hasAssignPermission ||
+                    (hasClaimPermission && isAssignedToSelf)
+                  );
+                };
+
+                if (canRemoveAssignment()) {
+                  onValueChange("");
+                }
+              }
+            }}
+            className="ml-2 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 p-1 rounded hover:bg-zinc-100 dark:hover:bg-zinc-600 cursor-pointer"
+          >
+            <IconX className="w-4 h-4" />
+          </span>
+        )}
+      </div>
+    </div>
+  );
+};
+
+const HostButton: React.FC<{
+  currentValue: string;
+  onValueChange: (value: string) => void;
+  isSubmitting: boolean;
+  canEdit: boolean;
+  availableUsers: any[];
+  currentUserId: number;
+  currentUserPicture?: string;
+  currentUserUsername?: string;
+  assignedUserPicture?: string;
+  assignedUserId?: string;
+  workspace?: any;
+  isHostRole?: boolean;
+  sessionType: string;
+}> = ({
+  currentValue,
+  onValueChange,
+  isSubmitting,
+  canEdit,
+  availableUsers,
+  currentUserId,
+  currentUserPicture,
+  currentUserUsername,
+  assignedUserPicture,
+  assignedUserId,
+  workspace,
+  isHostRole = false,
+  sessionType,
+}) => {
+  const filteredUsers = availableUsers;
+  const canRemoveHost = workspace
+    ? (() => {
+        const hasAssignPermission = canAssignUsers(
+          workspace.yourPermission,
+          sessionType,
+        ); //||
+        //workspace.yourPermission.includes("admin");
+        const hasClaimPermission = canClaimSelf(
+          workspace.yourPermission,
+          sessionType,
+        ); //||
+        //workspace.yourPermission.includes("admin");
+        const isCurrentUserAssigned =
+          assignedUserId === currentUserId.toString();
+
+        return (
+          hasAssignPermission || (hasClaimPermission && isCurrentUserAssigned)
+        );
+      })()
+    : true;
+
+  return (
+    <AutocompleteInput
+      currentValue={currentValue}
+      onValueChange={onValueChange}
+      isSubmitting={isSubmitting}
+      canEdit={canEdit}
+      availableUsers={filteredUsers}
+      currentUserId={currentUserId}
+      currentUserPicture={currentUserPicture}
+      currentUserUsername={currentUserUsername}
+      placeholder="Enter username to assign host"
+      assignedUserPicture={assignedUserPicture}
+      assignedUserId={assignedUserId}
+      isHostRole={isHostRole}
+      workspace={workspace}
+      canRemove={canRemoveHost}
+      sessionType={sessionType}
+    />
+  );
+};
+
+const RoleButton: React.FC<{
+  currentValue: string;
+  onValueChange: (value: string) => void;
+  isSubmitting: boolean;
+  canEdit: boolean;
+  availableUsers: any[];
+  currentUserId: number;
+  currentUserPicture?: string;
+  currentUserUsername?: string;
+  assignedUserPicture?: string;
+  assignedUserId?: string;
+  workspace?: any;
+  isHostRole?: boolean;
+  sessionType: string;
+  eligibleGroupRoles?: number[];
+  eligibleRoleIds?: string[];
+  currentUserRankId?: number | null;
+  currentUserRoleIds?: string[];
+}> = ({
+  currentValue,
+  onValueChange,
+  isSubmitting,
+  canEdit,
+  availableUsers,
+  currentUserId,
+  currentUserPicture,
+  currentUserUsername,
+  assignedUserPicture,
+  assignedUserId,
+  workspace,
+  isHostRole = false,
+  sessionType,
+  eligibleGroupRoles = [],
+  eligibleRoleIds = [],
+  currentUserRankId = null,
+  currentUserRoleIds = [],
+}) => {
+  const filteredUsers = availableUsers;
+  const canRemoveRole = workspace
+    ? (() => {
+        const hasAssignPermission = canAssignUsers(
+          workspace.yourPermission,
+          sessionType,
+        ); //||
+        //workspace.yourPermission.includes("admin");
+        const isCurrentUserAssigned =
+          assignedUserId === currentUserId.toString();
+        const hasClaimPermission = canClaimSelf(
+          workspace.yourPermission,
+          sessionType,
+        ); //||
+        //workspace.yourPermission.includes("admin");
+        return (
+          hasAssignPermission || (hasClaimPermission && isCurrentUserAssigned)
+        );
+      })()
+    : true;
+
+  return (
+    <AutocompleteInput
+      currentValue={currentValue}
+      onValueChange={onValueChange}
+      isSubmitting={isSubmitting}
+      canEdit={canEdit}
+      availableUsers={filteredUsers}
+      currentUserId={currentUserId}
+      currentUserPicture={currentUserPicture}
+      currentUserUsername={currentUserUsername}
+      placeholder="Enter username to assign role"
+      assignedUserPicture={assignedUserPicture}
+      assignedUserId={assignedUserId}
+      isHostRole={isHostRole}
+      workspace={workspace}
+      canRemove={canRemoveRole}
+      sessionType={sessionType}
+      eligibleGroupRoles={eligibleGroupRoles}
+      eligibleRoleIds={eligibleRoleIds}
+      currentUserRankId={currentUserRankId}
+      currentUserRoleIds={currentUserRoleIds}
+    />
+  );
+};
+
+const NotesSection: React.FC<{
+  sessionId: string;
+  canManage: boolean;
+  currentUser: any;
+  refreshKey?: number;
+  onDataChange?: () => void;
+}> = ({ sessionId, canManage, currentUser, refreshKey, onDataChange }) => {
+  const [notes, setNotes] = useState<any[]>([]);
+  const [newNote, setNewNote] = useState("");
+  const [isLoading, setIsLoading] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const router = useRouter();
+
+  const fetchNotes = async () => {
+    try {
+      setIsLoading(true);
+      const response = await axios.get(
+        `/api/workspace/${router.query.id}/sessions/${sessionId}/notes`,
+      );
+      setNotes(response.data.notes || []);
+    } catch (error) {
+      console.error("Failed to fetch notes:", error);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const addNote = async () => {
+    if (!newNote.trim()) return;
+
+    try {
+      setIsSubmitting(true);
+      await axios.post(
+        `/api/workspace/${router.query.id}/sessions/${sessionId}/notes`,
+        {
+          content: newNote.trim(),
+        },
+      );
+      setNewNote("");
+      fetchNotes();
+      onDataChange?.();
+      toast.success("Note added successfully");
+    } catch (error: any) {
+      console.error("Failed to add note:", error);
+      toast.error(error?.response?.data?.error || "Failed to add note");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  useEffect(() => {
+    if (sessionId) {
+      fetchNotes();
+    }
+  }, [sessionId, refreshKey]);
+
+  return (
+    <div>
+      <div className="flex items-center gap-2 mb-3">
+        <IconNotes className="w-5 h-5 text-primary" />
+        <h3 className="text-lg font-medium text-zinc-900 dark:text-white">
+          Notes
+        </h3>
+      </div>
+
+      {canManage && (
+        <div className="mb-4">
+          <div className="flex flex-col gap-2">
+            <textarea
+              value={newNote}
+              onChange={(e) => setNewNote(e.target.value)}
+              placeholder="Add a note about this session..."
+              className="flex-1 px-3 py-2 text-sm border border-gray-300 dark:border-zinc-600 rounded-lg resize-none focus:outline-none focus:ring-1 focus:ring-primary dark:bg-zinc-700 dark:text-white"
+              rows={2}
+              disabled={isSubmitting}
+            />
+            <div className="flex justify-between items-center">
+              <button
+                onClick={addNote}
+                disabled={isSubmitting || !newNote.trim()}
+                className="px-4 py-2 bg-primary text-white rounded-lg hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+              >
+                <IconSend className="w-4 h-4" />
+                Add Note
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div className="space-y-3 max-h-60 overflow-y-auto">
+        {isLoading ? (
+          <div className="text-center py-4 text-zinc-500 dark:text-zinc-400">
+            Loading notes...
+          </div>
+        ) : notes.length === 0 ? (
+          <div className="text-center py-8 bg-zinc-50 dark:bg-zinc-700/30 rounded-lg">
+            <IconNotes className="w-8 h-8 text-zinc-400 mx-auto mb-2" />
+            <p className="text-zinc-500 dark:text-zinc-400">No notes yet</p>
+            <p className="text-sm text-zinc-400 dark:text-zinc-500">
+              {canManage
+                ? "Add the first note above"
+                : "Notes will appear here when added"}
+            </p>
+          </div>
+        ) : (
+          notes.map((note) => (
+            <div
+              key={note.id}
+              className="bg-zinc-50 dark:bg-zinc-700/30 rounded-lg p-3"
+            >
+              <div className="flex items-start justify-between mb-2">
+                <div className="flex items-center gap-2">
+                  <img
+                    src={note.author?.picture || "/default-avatar.jpg"}
+                    alt={note.author?.username || "User"}
+                    className="w-6 h-6 rounded-full"
+                    onError={(e) => {
+                      e.currentTarget.src = "/default-avatar.jpg";
+                    }}
+                  />
+                  <span className="text-sm font-medium text-zinc-900 dark:text-white">
+                    {note.author?.username || "Unknown User"}
+                  </span>
+                  <span className="text-xs text-zinc-500 dark:text-zinc-400">
+                    {new Date(note.createdAt).toLocaleString()}
+                  </span>
+                </div>
+              </div>
+              <div className="prose text-zinc-700 dark:text-zinc-300 dark:prose-invert max-w-none text-sm">
+                <ReactMarkdown rehypePlugins={[rehypeSanitize]}>
+                  {note.content}
+                </ReactMarkdown>
+              </div>
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
+};
+
+const ActivityLogsSection: React.FC<{
+  sessionId: string;
+  refreshKey?: number;
+}> = ({ sessionId, refreshKey }) => {
+  const [logs, setLogs] = useState<any[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const router = useRouter();
+
+  const fetchLogs = async () => {
+    try {
+      setIsLoading(true);
+      const response = await axios.get(
+        `/api/workspace/${router.query.id}/sessions/${sessionId}/logs`,
+      );
+      setLogs(response.data.logs || []);
+    } catch (error) {
+      console.error("Failed to fetch logs:", error);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (sessionId) {
+      fetchLogs();
+    }
+  }, [sessionId, refreshKey]);
+
+  const getLogIcon = (action: string) => {
+    switch (action) {
+      case "role_assigned":
+      case "host_assigned":
+        return <IconUserPlus className="w-4 h-4 text-green-500" />;
+      case "role_unassigned":
+      case "host_unassigned":
+        return <IconUserMinus className="w-4 h-4 text-red-500" />;
+      case "session_claimed":
+        return <IconUserCheck className="w-4 h-4 text-blue-500" />;
+      case "tag_assigned":
+        return <IconTag className="w-4 h-4 text-blue-500" />;
+      case "tag_removed":
+        return <IconTag className="w-4 h-4 text-red-500" />;
+      default:
+        return <IconHistory className="w-4 h-4 text-zinc-500" />;
+    }
+  };
+
+  const getLogMessage = (log: any) => {
+    const actorName = log.actor?.username || "Unknown User";
+    const targetName = log.target?.username || "Unknown User";
+
+    switch (log.action) {
+      case "role_assigned":
+        return `${actorName} assigned ${targetName} to role "${
+          log.metadata?.roleName || "Unknown Role"
+        }"`;
+      case "role_unassigned":
+        return `${actorName} removed ${targetName} from role "${
+          log.metadata?.roleName || "Unknown Role"
+        }"`;
+      case "host_assigned":
+        return `${actorName} assigned ${targetName} as "Host"`;
+      case "host_unassigned":
+        return `${actorName} removed ${targetName} as "Host"`;
+      case "session_claimed":
+        return `${actorName} claimed this session`;
+      case "tag_assigned":
+        const oldTagName = log.metadata?.oldTag?.name;
+        const newTagName = log.metadata?.newTag?.name;
+        if (oldTagName) {
+          return `${actorName} changed tag from "${oldTagName}" to "${newTagName}"`;
+        }
+        return `${actorName} assigned tag "${newTagName}"`;
+      case "tag_removed":
+        const removedTagName = log.metadata?.oldTag?.name;
+        return `${actorName} removed tag "${removedTagName}"`;
+      default:
+        return `${actorName} performed an action`;
+    }
+  };
+
+  return (
+    <div>
+      <div className="flex items-center gap-2 mb-3">
+        <IconHistory className="w-5 h-5 text-primary" />
+        <h3 className="text-lg font-medium text-zinc-900 dark:text-white">
+          Activity Log
+        </h3>
+      </div>
+
+      <div className="space-y-2 max-h-60 overflow-y-auto">
+        {isLoading ? (
+          <div className="text-center py-4 text-zinc-500 dark:text-zinc-400">
+            Loading activity log...
+          </div>
+        ) : logs.length === 0 ? (
+          <div className="text-center py-8 bg-zinc-50 dark:bg-zinc-700/30 rounded-lg">
+            <IconHistory className="w-8 h-8 text-zinc-400 mx-auto mb-2" />
+            <p className="text-zinc-500 dark:text-zinc-400">No activity yet</p>
+            <p className="text-sm text-zinc-400 dark:text-zinc-500">
+              Actions will be logged here automatically
+            </p>
+          </div>
+        ) : (
+          logs.map((log) => (
+            <div
+              key={log.id}
+              className="flex items-start gap-3 p-3 bg-zinc-50 dark:bg-zinc-700/30 rounded-lg"
+            >
+              {getLogIcon(log.action)}
+              <div className="flex-1">
+                <p className="text-sm text-zinc-700 dark:text-zinc-300">
+                  {getLogMessage(log)}
+                </p>
+                <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">
+                  {new Date(log.createdAt).toLocaleString()}
+                </p>
+              </div>
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
+};
+
+export default SessionModal;

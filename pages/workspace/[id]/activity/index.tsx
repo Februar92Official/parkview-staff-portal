@@ -1,0 +1,1091 @@
+import workspace from "@/layouts/workspace";
+import { pageWithLayout } from "@/layoutTypes";
+import { loginState, workspacestate } from "@/state";
+import axios from "axios";
+import { useRouter } from "next/router";
+import { useEffect, useState, useMemo, Fragment } from "react";
+import { useRecoilState } from "recoil";
+import moment from "moment";
+import {
+  IconChevronRight,
+  IconUsers,
+  IconClock,
+  IconUserCircle,
+  IconMessageCircle2,
+  IconArrowLeft,
+  IconCalendarTime,
+  IconTarget,
+  IconClipboardList,
+  IconChartBar,
+  IconPlayerPlay,
+  IconMoon,
+  IconTrophy,
+  IconMedal,
+  IconCrown,
+  IconAward,
+  IconActivity,
+  IconCalendarStats,
+} from "@tabler/icons-react";
+import Tooltip from "@/components/tooltip";
+import randomText from "@/utils/randomText";
+import toast, { Toaster } from "react-hot-toast";
+import { Dialog, Transition } from "@headlessui/react";
+
+
+const Activity: pageWithLayout = () => {
+  const router = useRouter();
+  const { id } = router.query;
+  const [login] = useRecoilState(loginState);
+  const [workspace] = useRecoilState(workspacestate);
+  const text = useMemo(() => randomText(login.displayname), []);
+  const [myData, setMyData] = useState<any>(null);
+  const [myAssignments, setMyAssignments] = useState<any[]>([]);
+  const [timeline, setTimeline] = useState<any[]>([]);
+  const [isSessionModalOpen, setIsSessionModalOpen] = useState(false);
+  const [sessionDetails, setSessionDetails] = useState<any>({});
+  const [concurrentUsers, setConcurrentUsers] = useState<any[]>([]);
+  const [loadingSession, setLoadingSession] = useState(false);
+  const [loadingData, setLoadingData] = useState(true);
+  const [idleTimeEnabled, setIdleTimeEnabled] = useState(true);
+  const [topStaff, setTopStaff] = useState<any[]>([]);
+  const [activeUsers, setActiveUsers] = useState([]);
+  const [inactiveUsers, setInactiveUsers] = useState([]);
+  const [leaderboardStyle, setLeaderboardStyle] = useState<"list" | "podium">("list");
+  const [sessionsEnabled, setSessionsEnabled] = useState(false);
+
+  useEffect(() => {
+    async function fetchUserData() {
+      try {
+        let profileRes;
+        try {
+          profileRes = await axios.get(
+            `/api/workspace/${id}/profile/${login.userId}`
+          );
+        } catch (profileErr: any) {
+          console.error('[Activity] Profile API failed:', profileErr.response?.status, profileErr.response?.data);
+          throw profileErr;
+        }
+        const profileData = profileRes.data.data;
+
+        // Fetch activity config to check if idle time tracking is enabled
+        let configRes;
+        try {
+          configRes = await axios.get(
+            `/api/workspace/${id}/settings/activity/getConfig`
+          );
+        } catch (configErr: any) {
+          console.error('[Activity] Config API failed:', configErr.response?.status, configErr.response?.data);
+          throw configErr;
+        }
+        const idleTracking = configRes.data.idleTimeEnabled ?? true;
+        setIdleTimeEnabled(idleTracking);
+
+        let totalMinutes = 0;
+        let totalMessages = 0;
+        let totalIdleTime = 0;
+
+        (profileData.sessions || []).forEach((session: any) => {
+          if (session.endTime) {
+            const duration = Math.round(
+              (new Date(session.endTime).getTime() -
+                new Date(session.startTime).getTime()) /
+                60000
+            );
+            totalMinutes += duration;
+          }
+          totalMessages += session.messages || 0;
+          totalIdleTime += Number(session.idleTime) || 0;
+        });
+
+        totalMinutes += (profileData.adjustments || []).reduce(
+          (sum: number, adj: any) => sum + adj.minutes,
+          0
+        );
+
+        const totalIdleMinutes = Math.round(totalIdleTime);
+        const activeMinutes = idleTracking
+          ? Math.max(0, totalMinutes - totalIdleMinutes)
+          : totalMinutes;
+
+        const sessionsHosted = profileData.roleBasedSessionsHosted || 0;
+        const sessionsAttended = profileData.roleBasedSessionsAttended || 0;
+        const totalPlaySessions = (profileData.sessions || []).length;
+
+        setMyData({
+          minutes: activeMinutes,
+          totalMinutes: totalMinutes,
+          messages: totalMessages,
+          idleTime: totalIdleMinutes,
+          sessionsHosted,
+          sessionsAttended,
+          totalPlaySessions,
+          picture: profileData.avatar,
+          username: login.displayname,
+        });
+
+        if (profileData.assignments) {
+          setMyAssignments(profileData.assignments);
+        }
+
+        let sessionHistoryData: any[] = [];
+        try {
+          const sessionsRes = await axios.get(
+            `/api/workspace/${id}/profile/${login.userId}/sessions`
+          );
+          if (sessionsRes.data?.success) {
+            sessionHistoryData = sessionsRes.data.sessions || [];
+          }
+        } catch (sessionHistoryErr: any) {
+          console.error(
+            "[Activity] Session history API failed:",
+            sessionHistoryErr.response?.status,
+            sessionHistoryErr.response?.data
+          );
+        }
+
+        const timelineData = [];
+        if (profileData.sessions) {
+          timelineData.push(
+            ...profileData.sessions.map((s: any) => ({
+              ...s,
+              __type: "session",
+            }))
+          );
+        }
+
+        if (sessionHistoryData.length > 0) {
+          const now = new Date();
+          timelineData.push(
+            ...sessionHistoryData
+              .filter((s: any) => new Date(s.date) <= now)
+              .map((s: any) => ({
+                ...s,
+                __type: "sessionEntry",
+              }))
+          );
+        }
+
+        if (profileData.adjustments) {
+          timelineData.push(
+            ...profileData.adjustments.map((a: any) => ({
+              ...a,
+              __type: "adjustment",
+            }))
+          );
+        }
+        timelineData.sort((a, b) => {
+          const aDate =
+            a.__type === "adjustment"
+              ? new Date(a.createdAt).getTime()
+              : a.__type === "sessionEntry"
+              ? new Date(a.date).getTime()
+              : new Date(a.startTime || a.createdAt).getTime();
+          const bDate =
+            b.__type === "adjustment"
+              ? new Date(b.createdAt).getTime()
+              : b.__type === "sessionEntry"
+              ? new Date(b.date).getTime()
+              : new Date(b.startTime || b.createdAt).getTime();
+          return bDate - aDate;
+        });
+
+        setTimeline(timelineData);
+      } catch (error) {
+        if (axios.isAxiosError(error)) {
+          console.error('[Activity] API error details:', {
+            status: error.response?.status,
+            data: error.response?.data,
+          });
+          if (error.response?.status === 401) {
+            toast.error('You are not authorized to view this activity data');
+          } else if (error.response?.status === 404) {
+            toast.error('Activity data not found');
+          } else {
+            toast.error('Failed to load activity data. Please try refreshing the page.');
+          }
+        }
+      } finally {
+        setLoadingData(false);
+      }
+    }
+
+    if (id && login.userId && login.userId !== 1) {
+      setLoadingData(true);
+      fetchUserData();
+      const interval = setInterval(() => {
+        fetchUserData();
+      }, 30000);
+      return () => clearInterval(interval);
+    }
+  }, [id, login.userId]);
+
+  // Fetch leaderboard data for mobile view
+  useEffect(() => {
+    async function fetchLeaderboardData() {
+      try {
+        const usersRes = await axios.get(`/api/workspace/${id}/activity/users`);
+        setTopStaff(usersRes.data.message.topStaff);
+        setActiveUsers(usersRes.data.message.activeUsers);
+        setInactiveUsers(usersRes.data.message.inactiveUsers);
+      } catch (error) {
+        console.error("Error fetching leaderboard data:", error);
+      }
+    }
+
+    async function fetchLeaderboardConfig() {
+      try {
+        const res = await axios.get(
+          `/api/workspace/${id}/settings/general/leaderboard`
+        );
+        let enabled = false;
+        let style = "list";
+        let val = res.data.value ?? res.data;
+        if (typeof val === "string") {
+          try {
+            val = JSON.parse(val);
+          } catch {
+            val = {};
+          }
+        }
+        enabled =
+          typeof val === "object" && val !== null && "enabled" in val
+            ? (val as { enabled?: boolean }).enabled ?? false
+            : false;
+        style =
+          typeof val === "object" && val !== null && "style" in val
+            ? (val as { style?: string }).style ?? "list"
+            : "list";
+        setLeaderboardStyle(style as "list" | "podium");
+      } catch (error) {
+        console.error("Error fetching leaderboard config:", error);
+      }
+    }
+
+    async function fetchSessionsConfig() {
+      try {
+        const res = await axios.get(
+          `/api/workspace/${id}/settings/general/sessions`
+        );
+        const val = res.data.value ?? res.data;
+        const enabled = typeof val === "object" && val !== null && "enabled" in val
+          ? (val as { enabled?: boolean }).enabled ?? false
+          : !!val;
+        setSessionsEnabled(enabled);
+      } catch (error) {
+        setSessionsEnabled(false);
+      }
+    }
+
+    if (id) {
+      fetchLeaderboardData();
+      fetchLeaderboardConfig();
+      fetchSessionsConfig();
+    }
+  }, [id]);
+
+  const fetchSessionDetails = async (sessionId: string) => {
+    setLoadingSession(true);
+    setIsSessionModalOpen(true);
+    setConcurrentUsers([]);
+
+    try {
+      const sessionResponse = await axios.get(
+        `/api/workspace/${id}/activity/${sessionId}`
+      );
+      if (sessionResponse.status !== 200) {
+        toast.error("Could not fetch session details.");
+        setIsSessionModalOpen(false);
+        return;
+      }
+      const sessionData = sessionResponse.data;
+      setSessionDetails(sessionData);
+
+      if (sessionData.message?.startTime && sessionData.message?.endTime) {
+        try {
+          const concurrentResponse = await axios.get(
+            `/api/workspace/${id}/activity/concurrent?sessionId=${sessionId}&startTime=${sessionData.message.startTime}&endTime=${sessionData.message.endTime}`
+          );
+
+          if (concurrentResponse.status === 200) {
+            setConcurrentUsers(concurrentResponse.data.users || []);
+          }
+        } catch (error) {
+          console.error("Failed to fetch concurrent users:", error);
+        }
+      }
+    } catch (error) {
+      toast.error("Could not fetch session details.");
+      setIsSessionModalOpen(false);
+    } finally {
+      setLoadingSession(false);
+    }
+  };
+
+  const getQuotaTypeLabel = (type: string) => {
+    switch (type) {
+      case "mins":
+        return "minutes";
+      case "sessions_hosted":
+        return "sessions primary host";
+      case "sessions_secondary_host":
+        return "sessions secondary host";
+      case "sessions_attended":
+        return "sessions attended";
+      case "sessions_logged":
+        return "sessions logged";
+      case "alliance_visits":
+        return "alliance visits";
+      case "recommendation_submissions":
+        return "recommendation submissions";
+      case "recommendation_votes":
+        return "recommendation votes";
+      default:
+        return type;
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-zinc-50 dark:bg-zinc-900">
+      <div className="pagePadding">
+      {loadingData ? (
+        <div className="flex items-center justify-center min-h-[60vh]">
+          <div className="text-center">
+            <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary mx-auto mb-4"></div>
+            <p className="text-sm text-zinc-500 dark:text-zinc-400">Loading your activity...</p>
+          </div>
+        </div>
+      ) : (
+      <>
+      <div>
+        <div className="flex items-center gap-3 mb-6">
+          <div>
+            <h1 className="text-2xl font-medium text-zinc-900 dark:text-white">
+              Activity Dashboard
+            </h1>
+            <p className="text-sm text-zinc-500 dark:text-zinc-400 mt-1">
+              Monitor your performance and track detailed metrics
+            </p>
+          </div>
+        </div>
+
+        {/* Leaderboard - Mobile Only */}
+        {topStaff.length > 0 && (
+          <div className="md:hidden mb-8">
+            {leaderboardStyle === "podium" ? (
+              <div className="bg-white dark:bg-zinc-800 border border-white/10 rounded-xl p-6 shadow-sm">
+                <div className="flex items-center gap-3 mb-6">
+                  <div className="bg-primary/10 p-3 rounded-xl">
+                    <IconTrophy className="w-6 h-6 text-primary" />
+                  </div>
+                  <div>
+                    <h2 className="text-2xl font-bold text-zinc-900 dark:text-white">
+                      Leaderboard
+                    </h2>
+                    <p className="text-sm text-zinc-500 dark:text-zinc-400">
+                      Top performers this period
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-end justify-center gap-4">
+                  {topStaff[1] && (
+                    <div className="flex flex-col items-center flex-1 max-w-[100px]">
+                      <div className="relative mb-4">
+                        <div className={`w-16 h-16 rounded-full flex items-center justify-center ${getRandomBg(topStaff[1].userId)}`}>
+                          <img src={topStaff[1].picture} alt={topStaff[1].username} className="w-16 h-16 rounded-full border-4 border-gray-400 shadow-lg object-cover" style={{ background: "transparent" }} />
+                        </div>
+                        <div className="absolute -top-2 -right-2 bg-white dark:bg-zinc-800 rounded-full p-1">
+                          <IconMedal className="w-6 h-6 text-gray-400" />
+                        </div>
+                      </div>
+                      <div className="h-20 bg-gradient-to-t from-gray-400 to-gray-300 border-gray-500 border-2 rounded-t-lg w-20 flex flex-col items-center justify-center shadow-lg">
+                        <span className="text-white font-bold text-lg">2</span>
+                      </div>
+                      <div className="mt-4 text-center">
+                        <p className="font-semibold text-xs text-zinc-900 dark:text-white truncate max-w-[100px]">{topStaff[1].username}</p>
+                        <p className="text-xs text-zinc-600 dark:text-zinc-400">{Math.floor(topStaff[1].ms / 1000 / 60)}m</p>
+                      </div>
+                    </div>
+                  )}
+                  <div className="flex flex-col items-center flex-1 max-w-[120px]">
+                    <div className="relative mb-4">
+                      <div className={`w-20 h-20 rounded-full flex items-center justify-center ${getRandomBg(topStaff[0].userId)}`}>
+                        <img src={topStaff[0].picture} alt={topStaff[0].username} className="w-20 h-20 rounded-full border-4 border-yellow-400 shadow-xl object-cover" style={{ background: "transparent" }} />
+                      </div>
+                      <div className="absolute -top-3 -right-3 bg-white dark:bg-zinc-800 rounded-full p-2">
+                        <IconCrown className="w-7 h-7 text-yellow-500" />
+                      </div>
+                    </div>
+                    <div className="h-28 bg-gradient-to-t from-yellow-400 to-yellow-300 border-yellow-500 border-2 rounded-t-lg w-24 flex flex-col items-center justify-center shadow-xl relative">
+                      <div className="absolute -top-3 left-1/2 transform -translate-x-1/2">
+                        <div className="bg-yellow-500 text-white text-xs font-bold px-2 py-1 rounded-full">1ST</div>
+                      </div>
+                      <span className="text-white font-bold text-xl">1</span>
+                    </div>
+                    <div className="mt-4 text-center">
+                      <p className="font-bold text-sm text-zinc-900 dark:text-white truncate max-w-[120px]">{topStaff[0].username}</p>
+                      <p className="text-xs text-zinc-600 dark:text-zinc-400">{Math.floor(topStaff[0].ms / 1000 / 60)}m</p>
+                    </div>
+                  </div>
+                  {topStaff[2] && (
+                    <div className="flex flex-col items-center flex-1 max-w-[100px]">
+                      <div className="relative mb-4">
+                        <div className={`w-16 h-16 rounded-full flex items-center justify-center ${getRandomBg(topStaff[2].userId)}`}>
+                          <img src={topStaff[2].picture} alt={topStaff[2].username} className="w-16 h-16 rounded-full border-4 border-amber-600 shadow-lg object-cover" style={{ background: "transparent" }} />
+                        </div>
+                        <div className="absolute -top-2 -right-2 bg-white dark:bg-zinc-800 rounded-full p-1">
+                          <IconAward className="w-5 h-5 text-amber-600" />
+                        </div>
+                      </div>
+                      <div className="h-16 bg-gradient-to-t from-amber-600 to-amber-500 border-amber-700 border-2 rounded-t-lg w-16 flex flex-col items-center justify-center shadow-lg">
+                        <span className="text-white font-bold text-base">3</span>
+                      </div>
+                      <div className="mt-4 text-center">
+                        <p className="font-semibold text-xs text-zinc-900 dark:text-white truncate max-w-[100px]">{topStaff[2].username}</p>
+                        <p className="text-xs text-zinc-600 dark:text-zinc-400">{Math.floor(topStaff[2].ms / 1000 / 60)}m</p>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            ) : (
+              <div className="bg-white dark:bg-zinc-800 border border-white/10 rounded-xl p-4 shadow-sm">
+                <div className="flex items-center gap-3 mb-4">
+                  <div className="bg-primary/10 p-3 rounded-xl">
+                    <IconTrophy className="w-6 h-6 text-primary" />
+                  </div>
+                  <div>
+                    <h2 className="text-2xl font-bold text-zinc-900 dark:text-white">Leaderboard</h2>
+                    <p className="text-sm text-zinc-500 dark:text-zinc-400">Top performers this period</p>
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  {topStaff.slice(0, 3).map((user: any, index: number) => {
+                    const position = index + 1;
+                    let bgColor = "bg-zinc-50 dark:bg-zinc-700";
+                    let positionColor = "bg-zinc-300 dark:bg-zinc-600 text-zinc-700 dark:text-zinc-300";
+                    let borderColor = "border-transparent";
+                    if (position === 1) {
+                      bgColor = "bg-gradient-to-r from-yellow-50 to-amber-50 dark:from-yellow-900/20 dark:to-amber-900/20";
+                      positionColor = "bg-gradient-to-br from-yellow-400 to-amber-500 text-white";
+                      borderColor = "border-yellow-300 dark:border-yellow-700";
+                    } else if (position === 2) {
+                      bgColor = "bg-gradient-to-r from-gray-50 to-slate-50 dark:from-gray-800/50 dark:to-slate-800/50";
+                      positionColor = "bg-gradient-to-br from-gray-400 to-slate-500 text-white";
+                      borderColor = "border-gray-300 dark:border-gray-600";
+                    } else if (position === 3) {
+                      bgColor = "bg-gradient-to-r from-orange-50 to-amber-50 dark:from-orange-900/20 dark:to-amber-900/20";
+                      positionColor = "bg-gradient-to-br from-orange-500 to-amber-600 text-white";
+                      borderColor = "border-orange-300 dark:border-orange-700";
+                    }
+                    return (
+                      <div key={user.userId} className={`flex items-center justify-between p-2.5 rounded-lg ${bgColor} border ${borderColor} gap-2`}>
+                        <div className="flex items-center gap-2 flex-1 min-w-0">
+                          <div className={`flex items-center justify-center w-8 h-8 rounded-full font-bold ${positionColor} text-sm flex-shrink-0 shadow-md`}>{position}</div>
+                          <div className={`w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0 ${getRandomBg(user.userId)} ring-2 ring-white dark:ring-zinc-700`}>
+                            <img src={user.picture} alt={user.username} className="w-9 h-9 rounded-full border-2 border-white dark:border-zinc-700 shadow-sm object-cover" style={{ background: "transparent" }} />
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <span className="font-semibold text-sm text-zinc-900 dark:text-white truncate block">{user.username}</span>
+                          </div>
+                        </div>
+                        <div className="text-right flex-shrink-0">
+                          <p className="font-bold text-base text-zinc-900 dark:text-white whitespace-nowrap">{Math.floor(user.ms / 1000 / 60)}m</p>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* In-game/Inactive Staff - Mobile Only */}
+        {topStaff.length > 0 && (
+          <div className="md:hidden grid grid-cols-1 gap-4 mb-8">
+            {[
+              { title: "In-game Staff", subtitle: "Currently active members", users: activeUsers, emptyText: "No staff are currently in-game.", icon: IconUsers },
+              { title: "Inactive Staff", subtitle: "Staff on inactivity notice", users: inactiveUsers, emptyText: "No staff are currently inactive.", icon: IconUserCircle },
+            ].map(({ title, subtitle, users, emptyText, icon: Icon }) => (
+              <div key={title} className="bg-white dark:bg-zinc-800 rounded-xl p-6 shadow-sm">
+                <div className="flex items-center gap-3 mb-4">
+                  <div className="bg-primary/10 p-2 rounded-lg">
+                    <Icon className="w-5 h-5 text-primary" />
+                  </div>
+                  <div>
+                    <h3 className="text-base font-medium text-zinc-900 dark:text-white">{title}</h3>
+                    <p className="text-sm text-zinc-500 dark:text-zinc-400">{subtitle}</p>
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {users.map((user: any) => (
+                    <Tooltip key={user.userId} tooltipText={user.reason ? `${user.username} | ${moment(user.from).format("DD MMM")} - ${moment(user.to).format("DD MMM")}` : `${user.username}`} orientation="top">
+                      <div className={`w-10 h-10 rounded-full flex items-center justify-center ${getRandomBg(user.userId)} ring-2 ring-primary/10 hover:ring-primary/30 transition-all`}>
+                        <img src={user.picture} alt={user.username} className="w-10 h-10 rounded-full object-cover border-2 border-white" style={{ background: "transparent" }} />
+                      </div>
+                    </Tooltip>
+                  ))}
+                  {users.length === 0 && <p className="text-sm text-zinc-500 dark:text-zinc-400 italic">{emptyText}</p>}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 lg:gap-6 mb-8">
+          <div className="bg-white dark:bg-zinc-800 rounded-xl p-4 lg:p-6 border border-white/10 min-w-0">
+            <div className="flex items-center justify-between mb-4 lg:mb-6">
+              <div className="min-w-0 flex-1">
+                <h3 className="text-xs lg:text-sm font-medium text-zinc-900 dark:text-zinc-300 uppercase tracking-wide truncate">
+                  Active Time
+                </h3>
+              </div>
+              <div className="bg-emerald-500/20 p-2 lg:p-3 rounded-lg">
+                <IconClock className="w-4 h-4 lg:w-5 lg:h-5 text-emerald-400" />
+              </div>
+            </div>
+            <div className="text-2xl lg:text-3xl font-bold mb-1 lg:mb-2 text-zinc-900 dark:text-white">
+              {myData ? myData.minutes : 0}
+            </div>
+            <div className="text-xs lg:text-sm text-zinc-500 dark:text-zinc-400">
+              Time spent
+            </div>
+          </div>
+
+          {idleTimeEnabled && (
+            <div className="bg-white dark:bg-zinc-800 rounded-xl p-4 lg:p-6 border border-white/10 min-w-0">
+              <div className="flex items-center justify-between mb-4 lg:mb-6">
+                <div className="min-w-0 flex-1">
+                  <h3 className="text-xs lg:text-sm font-medium text-zinc-900 dark:text-zinc-300 uppercase tracking-wide truncate">
+                    Idle Time
+                  </h3>
+                </div>
+                <div className="bg-blue-500/20 p-2 lg:p-3 rounded-lg">
+                  <IconMoon className="w-4 h-4 lg:w-5 lg:h-5 text-blue-400" />
+                </div>
+              </div>
+              <div className="text-2xl lg:text-3xl font-bold mb-1 lg:mb-2 text-zinc-900 dark:text-white">
+                {myData ? myData.idleTime : 0}
+              </div>
+              <div className="text-xs lg:text-sm text-zinc-500 dark:text-zinc-400">
+                Time spent away from keyboard
+              </div>
+            </div>
+          )}
+
+          <div className="bg-white dark:bg-zinc-800 rounded-xl p-4 lg:p-6 border border-white/10 min-w-0">
+            <div className="flex items-center justify-between mb-4 lg:mb-6">
+              <div className="min-w-0 flex-1">
+                <h3 className="text-xs lg:text-sm font-medium text-zinc-900 dark:text-zinc-300 uppercase tracking-wide truncate">
+                  Messages
+                </h3>
+              </div>
+              <div className="bg-purple-500/20 p-2 lg:p-3 rounded-lg">
+                <IconMessageCircle2 className="w-4 h-4 lg:w-5 lg:h-5 text-purple-400" />
+              </div>
+            </div>
+            <div className="text-2xl lg:text-3xl font-bold mb-1 lg:mb-2 text-zinc-900 dark:text-white">
+              {myData ? myData.messages : 0}
+            </div>
+            <div className="text-xs lg:text-sm text-zinc-500 dark:text-zinc-400">
+              Chat messages
+            </div>
+          </div>
+
+          <div className="bg-white dark:bg-zinc-800 rounded-xl p-4 lg:p-6 border border-white/10 min-w-0">
+            <div className="flex items-center justify-between mb-4 lg:mb-6">
+              <div className="min-w-0 flex-1">
+                <h3 className="text-xs lg:text-sm font-medium text-zinc-900 dark:text-zinc-300 uppercase tracking-wide truncate">
+                  Total Sessions
+                </h3>
+              </div>
+              <div className="bg-orange-500/20 p-2 lg:p-3 rounded-lg">
+                <IconPlayerPlay className="w-4 h-4 lg:w-5 lg:h-5 text-orange-400" />
+              </div>
+            </div>
+            <div className="text-2xl lg:text-3xl font-bold mb-1 lg:mb-2 text-zinc-900 dark:text-white">
+              {myData ? myData.totalPlaySessions : 0}
+            </div>
+            <div className="text-sm text-zinc-500 dark:text-zinc-400">
+              Play sessions
+            </div>
+          </div>
+        </div>
+
+        {myData && (
+          <div className="mb-8">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <div className="bg-gradient-to-br from-blue-500 to-blue-600 rounded-xl p-6 text-white shadow-lg">
+                <div className="flex items-center justify-between mb-4">
+                  <div>
+                    <h3 className="text-sm font-medium text-blue-100 uppercase tracking-wide">
+                      Sessions Hosted
+                    </h3>
+                  </div>
+                  <div className="bg-white/20 p-3 rounded-lg">
+                    <IconUsers className="w-6 h-6 text-white" />
+                  </div>
+                </div>
+                <div className="text-4xl font-bold mb-2 text-white">
+                  {myData.sessionsHosted}
+                </div>
+                <div className="text-sm text-blue-100">Sessions you Hosted</div>
+              </div>
+
+              <div className="bg-gradient-to-br from-emerald-500 to-emerald-600 rounded-xl p-6 text-white shadow-lg">
+                <div className="flex items-center justify-between mb-4">
+                  <div>
+                    <h3 className="text-sm font-medium text-emerald-100 uppercase tracking-wide">
+                      Sessions Attended
+                    </h3>
+                  </div>
+                  <div className="bg-white/20 p-3 rounded-lg">
+                    <IconChartBar className="w-6 h-6 text-white" />
+                  </div>
+                </div>
+                <div className="text-4xl font-bold mb-2 text-white">
+                  {myData.sessionsAttended}
+                </div>
+                <div className="text-sm text-emerald-100">
+                  Sessions you participated in
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        <div className="mt-8">
+          <div className="bg-white dark:bg-zinc-800 rounded-xl shadow-sm overflow-hidden">
+            <div className="flex items-center gap-3 p-4 border-b border-zinc-200 dark:border-zinc-600">
+              <div className="bg-primary/10 p-2 rounded-lg">
+                <IconCalendarTime className="w-5 h-5 text-primary" />
+              </div>
+              <h2 className="text-lg font-medium text-zinc-900 dark:text-white">
+                Your Timeline
+              </h2>
+            </div>
+            <div className="p-4">
+              {timeline.length === 0 ? (
+                <div className="text-center py-12">
+                  <div className="bg-white dark:bg-zinc-800 rounded-xl p-8 max-w-md mx-auto">
+                    <div className="mx-auto w-16 h-16 bg-primary/10 rounded-full flex items-center justify-center mb-4">
+                      <IconClipboardList className="w-8 h-8 text-primary" />
+                    </div>
+                    <h3 className="text-lg font-medium text-zinc-900 dark:text-white mb-1">
+                      No Activity
+                    </h3>
+                    <p className="text-sm text-zinc-900 dark:text-white mb-4">
+                      No activity or adjustments have been recorded yet.
+                    </p>
+                  </div>
+                </div>
+              ) : (
+                <ol className="relative border-l border-gray-200 ml-3 mt-3">
+                  {timeline.map((item: any) => {
+                    if (item.__type === "session") {
+                      const isLive = item.active && !item.endTime;
+                      const sessionDuration = isLive
+                        ? Math.ceil(
+                            (new Date().getTime() -
+                              new Date(item.startTime).getTime()) /
+                              (1000 * 60)
+                          )
+                        : Math.ceil(
+                            (new Date(item.endTime || new Date()).getTime() -
+                              new Date(item.startTime).getTime()) /
+                              (1000 * 60)
+                          );
+
+                      return (
+                        <div key={`session-${item.id}`}>
+                          <li className="mb-6 ml-6">
+                            <span
+                              className={`flex absolute -left-3 justify-center items-center w-6 h-6 ${
+                                isLive
+                                  ? "bg-green-500 animate-pulse"
+                                  : "bg-primary"
+                              } rounded-full ring-4 ring-white`}
+                            >
+                              {isLive ? (
+                                <div className="w-3 h-3 bg-white rounded-full"></div>
+                              ) : (
+                                <img
+                                  className="rounded-full"
+                                  src={
+                                    item.user?.picture ||
+                                    myData?.picture ||
+                                    "/default-avatar.jpg"
+                                  }
+                                  alt="timeline avatar"
+                                />
+                              )}
+                            </span>
+                            <div
+                              onClick={() =>
+                                !isLive && fetchSessionDetails(item.id)
+                              }
+                              className={`p-4 ${
+                                isLive
+                                  ? "bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-700"
+                                  : "bg-zinc-50 dark:bg-zinc-500 border-zinc-100"
+                              } rounded-lg border ${
+                                !isLive
+                                  ? "cursor-pointer hover:bg-zinc-100 dark:hover:bg-zinc-600 transition-colors"
+                                  : ""
+                              }`}
+                            >
+                              <div className="flex justify-between items-center mb-1">
+                                <div className="flex items-center gap-2">
+                                  <p className="text-sm font-medium text-zinc-900 dark:text-white">
+                                    Activity Session
+                                  </p>
+                                  {isLive && (
+                                    <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">
+                                      LIVE
+                                    </span>
+                                  )}
+                                </div>
+                                <time className="text-xs text-zinc-500 dark:text-white">
+                                  {isLive ? (
+                                    <>
+                                      Started at{" "}
+                                      {moment(item.startTime).format("HH:mm")} •{" "}
+                                      {sessionDuration}m
+                                    </>
+                                  ) : (
+                                    <>
+                                      {moment(item.startTime).format("HH:mm")} -{" "}
+                                      {moment(item.endTime).format("HH:mm")} on{" "}
+                                      {moment(item.startTime).format(
+                                        "DD MMM YYYY"
+                                      )}{" "}
+                                      • {sessionDuration}m
+                                    </>
+                                  )}
+                                </time>
+                              </div>
+                              {isLive && (
+                                <p className="text-xs text-zinc-600 dark:text-zinc-300">
+                                  Currently active in game
+                                </p>
+                              )}
+                            </div>
+                          </li>
+                        </div>
+                      );
+                    }
+                    if (item.__type === "notice") {
+                      return null;
+                    }
+                    if (item.__type === "sessionEntry") {
+                      const userParticipation = item.users?.find(
+                        (u: any) => u.userid?.toString() === login.userId?.toString()
+                      );
+                      const slots: any[] = item.sessionType?.slots || [];
+                      const userRole = userParticipation
+                        ? slots.find((s: any) => s.id === userParticipation.roleID) ?? null
+                        : null;
+                      const isHostRole =
+                        userRole?.hostRole === "primary" || userRole?.hostRole === "secondary";
+                      return (
+                        <div key={`session-entry-${item.id}`}>
+                          <li className="mb-6 ml-6">
+                            <span className="flex absolute -left-3 justify-center items-center w-6 h-6 bg-indigo-500 rounded-full ring-4 ring-white">
+                              <IconCalendarStats className="w-3.5 h-3.5 text-white" />
+                            </span>
+                            <div className="p-4 bg-indigo-50 dark:bg-indigo-900/20 rounded-lg border border-indigo-200 dark:border-indigo-800">
+                              <div className="flex justify-between items-center mb-1 gap-2">
+                                <p className="text-sm font-medium text-zinc-900 dark:text-white truncate">
+                                  Session Entry: {item.sessionType?.name || "Session"}
+                                </p>
+                                <time className="text-xs text-zinc-500 dark:text-zinc-400 whitespace-nowrap">
+                                  {moment(item.date).format("DD MMM YYYY, HH:mm")}
+                                </time>
+                              </div>
+                              <p className="text-sm text-zinc-600 dark:text-zinc-300">
+                                {isHostRole
+                                  ? `You hosted as ${userRole?.name || "Host"}`
+                                  : `You participated${userRole?.name ? ` as ${userRole.name}` : ""}`}
+                              </p>
+                            </div>
+                          </li>
+                        </div>
+                      );
+                    }
+                    if (item.__type === "adjustment") {
+                      const positive = item.minutes > 0;
+                      return (
+                        <div key={`adjust-${item.id}`}>
+                          <li className="mb-6 ml-6">
+                            <span
+                              className={`flex absolute -left-3 justify-center items-center w-6 h-6 rounded-full ring-4 ring-white ${
+                                positive ? "bg-green-500" : "bg-red-500"
+                              } ${getRandomBg(item.actorId?.toString() || "")}`}
+                            >
+                              {item.actor?.picture ? (
+                                <img
+                                  className="rounded-full w-6 h-6"
+                                  src={item.actor.picture}
+                                  alt={item.actor.username || "Actor"}
+                                />
+                              ) : (
+                                <span className="text-white text-xs font-bold">
+                                  {positive ? "+" : "-"}
+                                </span>
+                              )}
+                            </span>
+                            <div className="p-4 bg-zinc-50 dark:bg-zinc-600 rounded-lg border border-zinc-100 dark:border-zinc-600">
+                              <div className="flex justify-between items-center mb-1">
+                                <p className="text-sm font-medium text-zinc-900 dark:text-white">
+                                  Manual Adjustment
+                                </p>
+                                <time className="text-xs text-zinc-500 dark:text-zinc-300">
+                                  {moment(item.createdAt).format(
+                                    "DD MMM YYYY, HH:mm"
+                                  )}
+                                </time>
+                              </div>
+                              <p className="text-sm text-zinc-600 dark:text-zinc-200">
+                                {positive ? "Awarded" : "Removed"}{" "}
+                                {Math.abs(item.minutes)} minutes by{" "}
+                                {item.actor?.username || "Unknown"}
+                              </p>
+                              {item.reason && (
+                                <p className="text-xs italic text-zinc-500 dark:text-zinc-400 mt-1">
+                                  Reason: {item.reason}
+                                </p>
+                              )}
+                            </div>
+                          </li>
+                        </div>
+                      );
+                    }
+                  })}
+                </ol>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <Transition appear show={isSessionModalOpen} as={Fragment}>
+        <Dialog
+          as="div"
+          className="relative z-10"
+          onClose={() => setIsSessionModalOpen(false)}
+        >
+          <Transition.Child
+            as={Fragment}
+            enter="ease-out duration-300"
+            enterFrom="opacity-0"
+            enterTo="opacity-100"
+            leave="ease-in duration-200"
+            leaveFrom="opacity-100"
+            leaveTo="opacity-0"
+          >
+            <div className="fixed inset-0 bg-black/30 backdrop-blur-sm" />
+          </Transition.Child>
+          <div className="fixed inset-0 overflow-y-auto">
+            <div className="flex min-h-full items-center justify-center p-4 text-center">
+              <Transition.Child
+                as={Fragment}
+                enter="ease-out duration-300"
+                enterFrom="opacity-0 scale-95"
+                enterTo="opacity-100 scale-100"
+                leave="ease-in duration-200"
+                leaveFrom="opacity-100 scale-100"
+                leaveTo="opacity-0 scale-95"
+              >
+                <Dialog.Panel className="w-full max-w-lg transform overflow-hidden rounded-xl bg-white dark:bg-zinc-800 text-left align-middle shadow-xl transition-all">
+                  {sessionDetails?.universe?.thumbnail && (
+                    <div className="relative h-32 bg-gradient-to-r from-blue-500 to-purple-600">
+                      <img
+                        src={sessionDetails.universe.thumbnail}
+                        alt="Game thumbnail"
+                        className="w-full h-full object-cover"
+                      />
+                      <div className="absolute inset-0 bg-black/20"></div>
+                    </div>
+                  )}
+                  <div className="p-6 border-b border-zinc-200 dark:border-zinc-700">
+                    <div className="flex items-center gap-3 mb-4">
+                      <div className="bg-primary/10 p-2 rounded-lg">
+                        <IconClock className="w-5 h-5 text-primary" />
+                      </div>
+                      <div>
+                        <Dialog.Title
+                          as="h3"
+                          className="text-xl font-semibold text-zinc-900 dark:text-white"
+                        >
+                          {sessionDetails?.message?.sessionMessage ||
+                            sessionDetails?.universe?.name ||
+                            "Unknown Game"}
+                        </Dialog.Title>
+                        <p className="text-sm text-zinc-500 dark:text-zinc-400">
+                          Activity Session Details
+                        </p>
+                      </div>
+                    </div>
+                    {concurrentUsers.length > 0 && (
+                      <div className="flex items-center gap-3">
+                        <span className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
+                          Played with:
+                        </span>
+                        <div className="flex flex-wrap gap-2">
+                          {concurrentUsers.map((user: any) => (
+                            <Tooltip key={user.userId} orientation="top" tooltipText={user.username}>
+                              <div
+                                className={`w-8 h-8 rounded-full overflow-hidden ring-2 ring-white dark:ring-zinc-800 ${getRandomBg(
+                                  user.userId,
+                                  user.username
+                                )}`}
+                              >
+                                <img
+                                  src={user.picture || "/default-avatar.jpg"}
+                                  alt={user.username}
+                                  className="w-full h-full object-cover"
+                                />
+                              </div>
+                            </Tooltip>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                  <div className="p-6">
+                    {loadingSession ? (
+                      <div className="flex items-center justify-center h-32">
+                        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
+                      </div>
+                    ) : (
+                      <div className="grid grid-cols-1 gap-4">
+                        <div className="bg-zinc-50 dark:bg-zinc-700/50 rounded-lg p-4 text-center">
+                          <div className="text-2xl font-bold text-zinc-900 dark:text-white mb-1">
+                            {(() => {
+                              if (
+                                !sessionDetails.message?.endTime ||
+                                !sessionDetails.message?.startTime
+                              ) {
+                                return "Ended";
+                              }
+                              const duration = moment.duration(
+                                moment(sessionDetails.message.endTime).diff(
+                                  moment(sessionDetails.message.startTime)
+                                )
+                              );
+                              const minutes = Math.floor(duration.asMinutes());
+                              return `${minutes} ${
+                                minutes === 1 ? "minute" : "minutes"
+                              }`;
+                            })()}
+                          </div>
+                          <div className="text-sm text-zinc-600 dark:text-zinc-400">
+                            Duration
+                          </div>
+                        </div>
+                        <div
+                          className={`grid ${
+                            idleTimeEnabled ? "grid-cols-2" : "grid-cols-1"
+                          } gap-4`}
+                        >
+                          {idleTimeEnabled && (
+                            <div className="bg-zinc-50 dark:bg-zinc-700/50 rounded-lg p-4 text-center">
+                              <div className="text-xl font-semibold text-zinc-900 dark:text-white mb-1">
+                                {sessionDetails.message?.idleTime || 0}
+                              </div>
+                              <div className="text-sm text-zinc-600 dark:text-zinc-400">
+                                Idle{" "}
+                                {(sessionDetails.message?.idleTime || 0) === 1
+                                  ? "minute"
+                                  : "minutes"}
+                              </div>
+                            </div>
+                          )}
+                          <div className="bg-zinc-50 dark:bg-zinc-700/50 rounded-lg p-4 text-center">
+                            <div className="text-xl font-semibold text-zinc-900 dark:text-white mb-1">
+                              {sessionDetails.message?.messages || 0}
+                            </div>
+                            <div className="text-sm text-zinc-600 dark:text-zinc-400">
+                              {(sessionDetails.message?.messages || 0) === 1
+                                ? "Message"
+                                : "Messages"}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                    <div className="mt-6">
+                      <button
+                        type="button"
+                        className="w-full justify-center rounded-lg bg-primary px-4 py-2 text-sm font-medium text-white hover:bg-primary/90 transition-colors"
+                        onClick={() => setIsSessionModalOpen(false)}
+                      >
+                        Close
+                      </button>
+                    </div>
+                  </div>
+                </Dialog.Panel>
+              </Transition.Child>
+            </div>
+          </div>
+        </Dialog>
+      </Transition>
+
+      </>
+      )}
+
+      <Toaster position="bottom-center" />
+      </div>
+    </div>
+  );
+};
+
+const ActionButton = ({ icon: Icon, title, desc, onClick }: any) => (
+  <button
+    onClick={onClick}
+    className="flex items-center gap-3 bg-white dark:bg-zinc-800 p-4 rounded-xl shadow-sm hover:shadow-md transition-all text-left"
+  >
+    <div className="bg-primary/10 p-2 rounded-lg">
+      <Icon className="w-5 h-5 text-primary" />
+    </div>
+    <div>
+      <p className="text-sm font-medium text-zinc-900 dark:text-white">
+        {title}
+      </p>
+      <p className="text-xs text-zinc-500 dark:text-zinc-400">{desc}</p>
+    </div>
+  </button>
+);
+
+const BG_COLORS = [
+  "bg-amber-200",
+  "bg-red-300",
+  "bg-lime-200",
+  "bg-emerald-300",
+  "bg-rose-200",
+  "bg-green-100",
+  "bg-teal-200",
+  "bg-yellow-200",
+  "bg-red-100",
+  "bg-green-300",
+  "bg-lime-300",
+  "bg-emerald-200",
+  "bg-rose-300",
+  "bg-amber-300",
+  "bg-red-200",
+  "bg-green-200",
+];
+
+function getRandomBg(userid: string, username?: string) {
+  const key = `${userid ?? ""}:${username ?? ""}`;
+  let hash = 5381;
+  for (let i = 0; i < key.length; i++) {
+    hash = ((hash << 5) - hash) ^ key.charCodeAt(i);
+  }
+  const index = (hash >>> 0) % BG_COLORS.length;
+  return BG_COLORS[index];
+}
+
+Activity.layout = workspace;
+
+export default Activity;

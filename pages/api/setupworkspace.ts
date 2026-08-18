@@ -1,0 +1,348 @@
+// Next.js API route support: https://nextjs.org/docs/api-routes/introduction
+import type { NextApiRequest, NextApiResponse } from "next";
+import {
+  getUsername,
+  getThumbnail,
+  getDisplayName,
+} from "@/utils/userinfoEngine";
+import { User } from "@/types/index.d";
+import prisma from "@/utils/database";
+import { getGroupLogo, getGroupInfo } from "@/utils/roblox";
+import { withSessionRoute } from "@/lib/withSession";
+import bcryptjs from "bcryptjs";
+import { setRegistry } from "@/utils/registryManager";
+import {
+  getRobloxUsername,
+  getRobloxThumbnail,
+  getRobloxDisplayName,
+  getRobloxUserId,
+} from "@/utils/roblox";
+
+type Data = {
+  success: boolean;
+  error?: string;
+  user?: User & { isOwner: boolean };
+  debug?: any;
+};
+
+type requestData = {
+  groupid: number;
+  username: string;
+  password: string;
+  color: string;
+};
+
+async function safeHashPassword(password: string): Promise<string> {
+  try {
+    return await bcryptjs.hash(password, 10);
+  } catch (error) {
+    console.error("Error hashing password:", error);
+    throw new Error("Failed to hash password");
+  }
+}
+
+export default withSessionRoute(handler);
+
+export async function handler(req: NextApiRequest, res: NextApiResponse<Data>) {
+  if (req.method !== "POST")
+    return res
+      .status(405)
+      .json({ success: false, error: "Method not allowed" });
+
+  if (!req.body || typeof req.body !== "object") {
+    console.error("Invalid request body:", req.body);
+    return res.status(400).json({
+      success: false,
+      error: "Invalid request body - must be JSON",
+    });
+  }
+
+  let { groupid, username, password, color, robloxApiKey } = req.body;
+  if (typeof robloxApiKey === "string") {
+    robloxApiKey = robloxApiKey.trim();
+    if (!robloxApiKey) robloxApiKey = undefined;
+  }
+  if (!groupid || !username || !password || !color) {
+    console.error("Missing required fields:", {
+      groupid,
+      username,
+      password,
+      color,
+    });
+    return res.status(400).json({
+      success: false,
+      error: "Missing required fields",
+    });
+  }
+
+  const groupIdNumber =
+    typeof groupid === "string" ? parseInt(groupid) : groupid;
+  if (isNaN(groupIdNumber)) {
+    console.error("Invalid groupid:", groupid);
+    return res.status(400).json({
+      success: false,
+      error: "Invalid groupid",
+    });
+  }
+
+  try {
+    let userid = (await getRobloxUserId(username, req.headers.origin).catch(
+      (e) => {
+        console.error("Error getting Roblox user ID:", e);
+        return null;
+      },
+    )) as number | undefined;
+
+    console.log("Got userid:", userid);
+
+    if (!userid) {
+      console.error("Username not found:", username);
+      return res
+        .status(404)
+        .json({ success: false, error: "Username not found" });
+    }
+
+    const existingWorkspace = await prisma.workspace.findFirst().catch((e) => {
+      console.error("Error checking existing workspace:", e);
+      return null;
+    });
+
+    if (existingWorkspace) {
+      console.error("Workspace already exists");
+      return res
+        .status(403)
+        .json({ success: false, error: "Workspace already exists" });
+    }
+
+    const hashedPassword = await safeHashPassword(password);
+    console.log("Password hashed successfully");
+
+    let groupName = `Group ${groupIdNumber}`;
+    let groupLogo = "";
+
+    try {
+      const [logo, group] = await Promise.all([
+        getGroupLogo(groupIdNumber),
+        getGroupInfo(groupIdNumber).catch(() => null) as any,
+      ]);
+      if (group) groupName = group.name;
+      if (logo) groupLogo = logo;
+    } catch (err) {
+      console.error("Failed to fetch group info during workspace setup:", err);
+    }
+
+    await prisma
+      .$transaction(async (tx) => {
+        const existsInTx = await tx.workspace.findFirst();
+        if (existsInTx) {
+          throw new Error("WORKSPACE_EXISTS");
+        }
+
+        await tx.workspace.create({
+          data: {
+            groupId: groupIdNumber,
+            groupName,
+            groupLogo,
+            ownerId: BigInt(userid!),
+            lastSynced: new Date(),
+          },
+        });
+
+        console.log("Created workspace");
+
+        await tx.config.createMany({
+          data: [
+            {
+              key: "customization",
+              workspaceGroupId: groupIdNumber,
+              value: { color },
+            },
+            { key: "theme", workspaceGroupId: groupIdNumber, value: color },
+            {
+              key: "allies",
+              workspaceGroupId: groupIdNumber,
+              value: { enabled: true },
+            },
+            {
+              key: "recommendations",
+              workspaceGroupId: groupIdNumber,
+              value: { enabled: false },
+            },
+            {
+              key: "policies",
+              workspaceGroupId: groupIdNumber,
+              value: { enabled: false },
+            },
+            {
+              key: "home",
+              workspaceGroupId: groupIdNumber,
+              value: {
+                widgets: ["birthdays", "new_members", "sessions", "sticky_notes"],
+                layout: [
+                  { i: "birthdays",    x: 0, y: 0, w: 12, h: 2 },
+                  { i: "new_members",  x: 0, y: 2, w: 12, h: 2 },
+                  { i: "sessions",     x: 0, y: 4, w: 6,  h: 4 },
+                  { i: "sticky_notes", x: 6, y: 4, w: 6,  h: 4 },
+                ],
+              },
+            },
+          ],
+        });
+
+        console.log("Created all configs successfully");
+        await tx.user.upsert({
+          where: { userid: userid! },
+          update: { isOwner: true },
+          create: {
+            userid: userid!,
+            info: { create: { passwordhash: hashedPassword } },
+            isOwner: true,
+          },
+        });
+
+        console.log("Created/updated user");
+
+        const defaultRole = await tx.role.create({
+          data: {
+            name: "Default",
+            workspaceGroupId: groupIdNumber,
+            permissions: [],
+            groupRoles: [],
+          },
+        });
+
+        console.log("Created default role");
+
+        await tx.user.update({
+          where: { userid: BigInt(userid!) },
+          data: { roles: { connect: { id: defaultRole.id } } },
+        });
+
+        console.log("Assigned user to default role");
+
+        await tx.workspaceMember.create({
+          data: {
+            workspaceGroupId: groupIdNumber,
+            userId: BigInt(userid!),
+            joinDate: new Date(),
+            isAdmin: true,
+          },
+        });
+
+        console.log("Created workspace member with admin status");
+
+        await tx.sessionRoleTemplate.createMany({
+          data: [
+            {
+              name: 'Host',
+              hostRole: 'primary',
+              weight: 0,
+              slots: 1,
+              groupRoles: [],
+              workspaceGroupId: groupIdNumber,
+            },
+            {
+              name: 'Co-Host',
+              hostRole: 'secondary',
+              weight: 1,
+              slots: 1,
+              groupRoles: [],
+              workspaceGroupId: groupIdNumber,
+            },
+          {
+            name: 'Trainer A',
+            weight: 2,
+            slots: 1,
+            groupRoles: [],
+            workspaceGroupId: groupIdNumber,
+          },
+          {
+            name: 'Trainer B',
+            weight: 3,
+            slots: 1,
+            groupRoles: [],
+            workspaceGroupId: groupIdNumber,
+          },
+          {
+            name: 'Trainer C',
+            weight: 4,
+            slots: 1,
+            groupRoles: [],
+            workspaceGroupId: groupIdNumber,
+          },
+        ],
+        });
+
+        console.log("Created default session role templates");
+      })
+      .catch((e) => {
+        console.error("Transaction failed:", e);
+        throw new Error("Failed to set up workspace");
+      });
+
+    req.session.userid = userid;
+    await req.session?.save();
+
+    const userInfo: User & { isOwner: boolean } = {
+      userId: req.session.userid,
+      username: await getUsername(req.session.userid),
+      displayname: await getDisplayName(req.session.userid),
+      thumbnail: getThumbnail(req.session.userid),
+      isOwner: true,
+    };
+
+    await setRegistry(req.headers.host as string);
+
+    if (robloxApiKey && typeof robloxApiKey === "string") {
+      try {
+        await prisma.workspaceExternalServices.upsert({
+          where: { workspaceGroupId: groupIdNumber },
+          update: { robloxApiKey },
+          create: { workspaceGroupId: groupIdNumber, robloxApiKey },
+        });
+      } catch (err) {
+        console.error("[setupworkspace] Failed to save Roblox API key:", err);
+      }
+    }
+
+    try {
+      const v2Res = await fetch(`https://groups.roblox.com/v2/users/${userid}/groups/roles`);
+      if (v2Res.ok) {
+        const v2Data = await v2Res.json();
+        const membership = v2Data.data?.find((g: any) => g.group?.id === groupIdNumber);
+        if (membership?.role?.id) {
+          await prisma.rank.upsert({
+            where: {
+              userId_workspaceGroupId: {
+                userId: BigInt(userid!),
+                workspaceGroupId: groupIdNumber,
+              },
+            },
+            update: { rankId: BigInt(membership.role.id) },
+            create: {
+              userId: BigInt(userid!),
+              workspaceGroupId: groupIdNumber,
+              rankId: BigInt(membership.role.id),
+            },
+          });
+        }
+      }
+    } catch (err) {
+      console.error("[setupworkspace] Failed to store owner rank ID:", err);
+    }
+
+    return res.status(200).json({ success: true, user: userInfo });
+  } catch (error: any) {
+    if (error instanceof Error && error.message === "WORKSPACE_EXISTS") {
+      return res
+        .status(403)
+        .json({ success: false, error: "Workspace already exists" });
+    }
+    console.error("Error in setup workspace:", error);
+    return res.status(500).json({
+      success: false,
+      error: "Internal server error",
+      debug: process.env.NODE_ENV === "development" ? error : undefined,
+    });
+  }
+}

@@ -1,0 +1,200 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,100..900;1,14..32,100..900&display=swap');
+
+/* TipTap WYSIWYG editor */
+.ProseMirror {
+  padding: 1rem;
+  min-height: 320px;
+  outline: none;
+}
+.ProseMirror p.is-editor-empty:first-child::before {
+  content: attr(data-placeholder);
+  float: left;
+  color: #a1a1aa;
+  pointer-events: none;
+  height: 0;
+}
+
+html,
+body {
+  padding: 0;
+  margin: 0;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Oxygen,
+    Ubuntu, Cantarell, Fira Sans, Droid Sans, Helvetica Neue, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+.h-screen-safe {
+  height: 100vh;
+  height: 100dvh;
+}
+
+.min-h-screen-safe {
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+
+html.dark,
+html.dark body {
+  background-color: #18181B;
+}
+
+html.dark {
+  -webkit-transform: translateZ(0);
+  transform: translateZ(0);
+}
+
+.dark [class*="transition"] {
+  -webkit-backface-visibility: hidden;
+  backface-visibility: hidden;
+}
+
+@layer base {
+  a {
+    color: inherit;
+    text-decoration: none;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
+button:focus:not(:focus-visible),
+[role="tab"]:focus:not(:focus-visible),
+input:focus:not(:focus-visible),
+textarea:focus:not(:focus-visible),
+select:focus:not(:focus-visible) {
+  outline: none;
+  box-shadow: none;
+}
+
+button:focus,
+button:focus-visible,
+[role="tab"]:focus,
+[role="tab"]:focus-visible {
+  outline: none !important;
+  box-shadow: none !important;
+}
+
+/*
+@media (prefers-color-scheme: dark) {
+  html {
+    color-scheme: dark;
+  }
+  body {
+    color: white;
+    background: black;
+  }
+}*/
+
+@reference "tailwindcss";
+
+@layer components { 
+	.cardBtn {
+		@apply px-5 py-4 bg-white rounded-md mt-3 w-full outline-1 cursor-pointer outline-gray-300 outline text-left hover:bg-zinc-200 focus-visible:bg-zinc-200 transition;
+	}
+	.pagePadding {
+		@apply 2xl:pr-12 lg:pr-10 md:pr-8 sm:pr-6 pr-4 md:pl-6 pl-4 py-8;
+	}
+
+}
+
+@layer utilities {
+	.scrollbar-hide {
+		-ms-overflow-style: none;
+		scrollbar-width: none;
+	}
+	.scrollbar-hide::-webkit-scrollbar {
+		display: none;
+	}
+	
+	/* Safe area for mobile devices with notches/home indicators */
+	.safe-area-bottom {
+		padding-bottom: env(safe-area-inset-bottom, 0px);
+	}
+}
+
+::-webkit-scrollbar {
+	width: 8px;
+	height: 8px;
+	background: transparent;
+}
+
+::-webkit-scrollbar-track {
+	background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+	background: transparent;
+	border-radius: 4px;
+	transition: background 0.2s ease;
+}
+
+*:hover::-webkit-scrollbar-thumb {
+	background: rgba(0, 0, 0, 0.3);
+}
+
+*:hover::-webkit-scrollbar-thumb:hover {
+	background: rgba(0, 0, 0, 0.5);
+}
+
+.dark *:hover::-webkit-scrollbar-thumb {
+	background: rgba(255, 255, 255, 0.3);
+}
+
+.dark *:hover::-webkit-scrollbar-thumb:hover {
+	background: rgba(255, 255, 255, 0.5);
+}
+
+* {
+	scrollbar-width: thin;
+	scrollbar-color: transparent transparent;
+}
+
+*:hover {
+	scrollbar-color: rgba(0, 0, 0, 0.3) transparent;
+}
+
+.dark *:hover {
+	scrollbar-color: rgba(255, 255, 255, 0.3) transparent;
+}
+.dark input[type="date"]::-webkit-calendar-picker-indicator,
+.dark input[type="time"]::-webkit-calendar-picker-indicator {
+	filter: invert(1) brightness(1.5) !important;
+}
+.dark input::-webkit-clear-button,
+.dark input::-webkit-inner-spin-button {
+	filter: invert(1) brightness(1.5) !important;
+}
+.dark .force-light-icon {
+	color: #fff !important;
+}
+
+ul[data-type="taskList"] {
+	list-style: none;
+	padding: 0;
+  
+	p {
+	  margin: 0;
+	}
+  
+	li {
+	  display: flex;
+  
+	  > label {
+		flex: 0 0 auto;
+		margin-right: 0.5rem;
+		user-select: none;
+	  }
+  
+	  > div {
+		flex: 1 1 auto;
+	  }
+	}
+  }

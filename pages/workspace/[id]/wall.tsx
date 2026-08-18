@@ -1,0 +1,795 @@
+import type { pageWithLayout } from "@/layoutTypes";
+import { loginState, workspacestate } from "@/state";
+import Workspace from "@/layouts/workspace";
+import { useState, useRef, useEffect } from "react";
+import { useRecoilState } from "recoil";
+import Button from "@/components/button";
+import { GetServerSideProps, InferGetServerSidePropsType } from "next";
+import { withPermissionCheckSsr } from "@/utils/permissionsManager";
+import prisma from "@/utils/database";
+import { getGroupRoles } from "@/utils/roblox";
+import type { wallPost } from "@prisma/client";
+
+type WallPostWithAuthor = wallPost & {
+  author: {
+    userid: string;
+    username: string | null;
+    picture: string | null;
+    rankId?: number | null;
+    rankName?: string | null;
+    departments?: Array<{
+      id: string;
+      name: string;
+      color: string | null;
+    }>;
+  };
+  reactions?: Array<{
+    emoji: string;
+    userId: string;
+  }>;
+};
+import moment from "moment";
+import { withSessionSsr } from "@/lib/withSession";
+import toast, { Toaster } from "react-hot-toast";
+import { useRouter } from "next/router";
+import axios from "axios";
+import {
+  IconSend,
+  IconPhoto,
+  IconMoodSmile,
+  IconX,
+  IconTrash,
+  IconInbox,
+} from "@tabler/icons-react";
+import EmojiPicker, { EmojiStyle, Theme } from "emoji-picker-react";
+import sanitizeHtml from "sanitize-html";
+import ReactMarkdown from "react-markdown";
+import rehypeSanitize from "rehype-sanitize";
+
+const SANITIZE_OPTIONS = {
+  allowedTags: [],
+  allowedAttributes: {},
+  disallowedTagsMode: "recursiveEscape" as const,
+  nonTextTags: ["style", "script", "textarea", "option"],
+};
+
+const WALLMSGS = [
+  "What's on your mind?",
+  "Share an update with your team...",
+  "What should the team know right now?",
+  "Drop a quick announcement...",
+  "Shout out someone who helped today.",
+  "What is next on your plan?",
+  "Post a reminder for upcoming events...",
+  "What went better than expected today?",
+  "Highlight one thing the team nailed.",
+  "What are you focusing on this week?",
+  "Share context before your next handoff...",
+  "Got news? Post it to everyone.",
+];
+
+const DEFAULT_WALLMSG = WALLMSGS[0];
+
+const getRandomWallMsg = () => {
+  return WALLMSGS[Math.floor(Math.random() * WALLMSGS.length)];
+};
+
+export const getServerSideProps: GetServerSideProps = withPermissionCheckSsr(
+  async ({ query, req }) => {
+    const workspaceGroupId = parseInt(query.id as string);
+    const workspace = await prisma.workspace.findUnique({
+      where: { groupId: workspaceGroupId },
+    });
+
+    const posts = await prisma.wallPost.findMany({
+      where: {
+        workspaceGroupId: workspaceGroupId,
+      },
+      orderBy: {
+        createdAt: "desc",
+      },
+      include: {
+        author: {
+          select: {
+            userid: true,
+            username: true,
+            picture: true,
+            ranks: {
+              where: {
+                workspaceGroupId: workspaceGroupId,
+              },
+            },
+            workspaceMemberships: {
+              where: {
+                workspaceGroupId: workspaceGroupId,
+              },
+              include: {
+                departmentMembers: {
+                  include: {
+                    department: {
+                      select: {
+                        id: true,
+                        name: true,
+                        color: true,
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+        reactions: {
+          select: {
+            emoji: true,
+            userId: true,
+          },
+        },
+      },
+    });
+
+    const roleIdToInfoMap = new Map<number, { rank: number; name: string }>();
+    const rolesByRank: any[] = [];
+
+    if (workspace) {
+      const roles = await getGroupRoles(Number(workspace.groupId));
+      roles.sort((a: any, b: any) => a.rank - b.rank);
+      rolesByRank.push(...roles);
+      roles.forEach((role: any) => {
+        roleIdToInfoMap.set(role.id, { rank: role.rank, name: role.name });
+      });
+    }
+
+    const postsWithDetails = posts.map((post) => {
+      const rank = post.author.ranks?.[0];
+      let rankName = null;
+
+      if (rank) {
+        const storedValue = Number(rank.rankId);
+        if (storedValue > 255) {
+          rankName = roleIdToInfoMap.get(storedValue)?.name || null;
+        } else {
+          const role = rolesByRank.find((r: any) => r.rank === storedValue);
+          rankName = role?.name || null;
+        }
+      }
+
+      const departments =
+        post.author.workspaceMemberships?.[0]?.departmentMembers?.map(
+          (dm) => dm.department,
+        ) || [];
+
+      return {
+        ...post,
+        author: {
+          userid: post.author.userid,
+          username: post.author.username,
+          picture: post.author.picture,
+          rankId: rank ? Number(rank.rankId) : null,
+          rankName,
+          departments,
+        },
+      };
+    });
+
+    const user = await prisma.user.findUnique({
+      where: { userid: req.session.userid },
+      include: {
+        roles: {
+          where: { workspaceGroupId: workspaceGroupId },
+          orderBy: { isOwnerRole: "desc" },
+        },
+        workspaceMemberships: {
+          where: { workspaceGroupId: workspaceGroupId },
+        },
+      },
+    });
+
+    const userPermissions = user?.roles?.[0]?.permissions || [];
+    const userIsAdmin = user?.workspaceMemberships?.[0]?.isAdmin || false;
+
+    return {
+      props: {
+        posts: JSON.parse(
+          JSON.stringify(postsWithDetails, (key, value) =>
+            typeof value === "bigint" ? value.toString() : value,
+          ),
+        ) as WallPostWithAuthor[],
+        userPermissions,
+        userIsAdmin,
+      },
+    };
+  },
+);
+
+type pageProps = {
+  posts: WallPostWithAuthor[];
+  userPermissions: string[];
+  userIsAdmin: boolean;
+};
+
+const Wall: pageWithLayout<pageProps> = (props) => {
+  const router = useRouter();
+  const { id } = router.query;
+
+  const [login, setLogin] = useRecoilState(loginState);
+  const [workspace, setWorkspace] = useRecoilState(workspacestate);
+  const [wallMessage, setWallMessage] = useState("");
+  const [posts, setPosts] = useState(props.posts);
+  const userPermissions = props.userPermissions;
+  const userIsAdmin = props.userIsAdmin;
+  const [loading, setLoading] = useState(false);
+  const [showEmojiPicker, setShowEmojiPicker] = useState(false);
+  const [selectedImage, setSelectedImage] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [postToDelete, setPostToDelete] = useState<number | null>(null);
+  const [composerPlaceholder, setComposerPlaceholder] = useState(DEFAULT_WALLMSG);
+  const [showReactionPickerForPost, setShowReactionPickerForPost] = useState<
+    number | null
+  >(null);
+
+  // Sanitize posts on client-side as an extra layer of security
+  useEffect(() => {
+    if (typeof window !== "undefined" && props.posts.length > 0) {
+      const sanitizedPosts = props.posts.map((post) => ({
+        ...post,
+        content:
+          typeof post.content === "string"
+            ? sanitizeHtml(post.content, SANITIZE_OPTIONS)
+            : post.content,
+        image: typeof post.image === "string" ? post.image : null,
+      }));
+      setPosts(sanitizedPosts);
+    }
+  }, [props.posts]);
+
+  useEffect(() => {
+    setComposerPlaceholder(getRandomWallMsg());
+  }, []);
+
+  const confirmDelete = async () => {
+    if (!postToDelete) return;
+
+    try {
+      await axios.delete(`/api/workspace/${id}/wall/${postToDelete}/delete`);
+      setPosts((prev) => prev.filter((p) => p.id !== postToDelete));
+      toast.success("Post deleted");
+    } catch (e: any) {
+      console.error(e);
+      toast.error("Failed to delete post");
+    } finally {
+      setShowDeleteModal(false);
+      setPostToDelete(null);
+    }
+  };
+
+  function sendPost() {
+    if (!canPostOnWall()) {
+      return;
+    }
+
+    setLoading(true);
+    axios
+      .post(`/api/workspace/${id}/wall/post`, {
+        content: wallMessage,
+        image: selectedImage,
+      })
+      .then((req) => {
+        toast.success("Wall message posted!");
+        setWallMessage("");
+        setSelectedImage(null);
+        setPosts([{ ...req.data.post, reactions: req.data.post?.reactions || [] }, ...posts]);
+        setLoading(false);
+      })
+      .catch((error) => {
+        console.error(error);
+        toast.error(
+          error.response?.data?.error || "Could not post wall message.",
+        );
+        setLoading(false);
+      });
+  }
+
+  const onEmojiClick = (emojiObject: any) => {
+    setWallMessage((prev) => prev + emojiObject.emoji);
+    setShowEmojiPicker(false);
+  };
+
+  const handleImageSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    // Validate file type
+    const allowedTypes = ["image/jpeg", "image/png", "image/gif", "image/webp"];
+    if (!allowedTypes.includes(file.type)) {
+      toast.error(
+        "Invalid file type. Only JPEG, PNG, GIF, and WEBP are supported.",
+      );
+      if (fileInputRef.current) {
+        fileInputRef.current.value = "";
+      }
+      return;
+    }
+
+    // Validate file size (limit to 5MB)
+    const maxSize = 5 * 1024 * 1024; // 5MB in bytes
+    if (file.size > maxSize) {
+      toast.error("File too large. Maximum size is 5MB.");
+      if (fileInputRef.current) {
+        fileInputRef.current.value = "";
+      }
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      const result = reader.result as string;
+      if (typeof result === "string" && result.startsWith("data:image/")) {
+        setSelectedImage(result);
+      } else {
+        toast.error("Invalid image format.");
+        if (fileInputRef.current) {
+          fileInputRef.current.value = "";
+        }
+      }
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const removeImage = () => {
+    setSelectedImage(null);
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
+    }
+  };
+
+  const BG_COLORS = [
+    "bg-amber-200",
+    "bg-red-300",
+    "bg-lime-200",
+    "bg-emerald-300",
+    "bg-rose-200",
+    "bg-green-100",
+    "bg-teal-200",
+    "bg-yellow-200",
+    "bg-red-100",
+    "bg-green-300",
+    "bg-lime-300",
+    "bg-emerald-200",
+    "bg-rose-300",
+    "bg-amber-300",
+    "bg-red-200",
+    "bg-green-200",
+  ];
+
+  function getRandomBg(userid: string, username?: string) {
+    const key = `${userid ?? ""}:${username ?? ""}`;
+    let hash = 5381;
+    for (let i = 0; i < key.length; i++) {
+      hash = ((hash << 5) - hash) ^ key.charCodeAt(i);
+    }
+    const index = (hash >>> 0) % BG_COLORS.length;
+    return BG_COLORS[index];
+  }
+
+  const canPostOnWall = () => {
+    try {
+      return userIsAdmin || userPermissions.includes("post_on_wall");
+    } catch (e) {
+      return false;
+    }
+  };
+
+  const canAddPhotos = () => {
+    try {
+      return userIsAdmin || userPermissions.includes("add_wall_photos");
+    } catch (e) {
+      return false;
+    }
+  };
+
+  const canReactOnWall = () => {
+    try {
+      return userIsAdmin || userPermissions.includes("react_wall");
+    } catch (e) {
+      return false;
+    }
+  };
+
+  const getReactionCounts = (post: WallPostWithAuthor) => {
+    const counts = new Map<string, number>();
+    for (const reaction of post.reactions || []) {
+      counts.set(reaction.emoji, (counts.get(reaction.emoji) || 0) + 1);
+    }
+    return Array.from(counts.entries())
+      .map(([emoji, count]) => ({ emoji, count }))
+      .sort((a, b) => b.count - a.count || a.emoji.localeCompare(b.emoji));
+  };
+
+  const getUserReaction = (post: WallPostWithAuthor) => {
+    return (post.reactions || []).find(
+      (reaction) => String(reaction.userId) === String(login.userId),
+    );
+  };
+
+  const toggleReaction = async (postId: number, emoji: string) => {
+    if (!canReactOnWall()) return;
+
+    try {
+      const response = await axios.post(
+        `/api/workspace/${id}/wall/${postId}/reaction`,
+        { emoji },
+      );
+
+      if (!response.data?.success) {
+        toast.error(response.data?.error || "Failed to update reaction");
+        return;
+      }
+
+      setPosts((prev) =>
+        prev.map((post) => {
+          if (post.id !== postId) return post;
+
+          const currentReactions = post.reactions || [];
+          // Remove any existing reaction by this user
+          const filtered = currentReactions.filter(
+            (reaction) => String(reaction.userId) !== String(login.userId),
+          );
+
+          // If reacted = true, add the new reaction
+          let nextReactions = filtered;
+          if (response.data.reaction?.reacted) {
+            nextReactions = [
+              ...filtered,
+              { emoji, userId: String(login.userId) },
+            ];
+          }
+
+          return {
+            ...post,
+            reactions: nextReactions,
+          };
+        }),
+      );
+    } catch (error: any) {
+      console.error(error);
+      toast.error(error?.response?.data?.error || "Failed to update reaction");
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-zinc-50 dark:bg-zinc-900">
+      <div className="pagePadding">
+        <Toaster position="bottom-center" />
+
+        <div className="flex items-center gap-3 mb-6">
+          <div>
+            <h1 className="text-2xl font-medium text-zinc-900 dark:text-white">
+              Group Wall
+            </h1>
+            <p className="text-sm text-zinc-500 dark:text-zinc-400 mt-1">
+              Share updates and announcements with your team
+            </p>
+          </div>
+        </div>
+
+        {canPostOnWall() && (
+          <div className="bg-white dark:bg-zinc-800 border border-zinc-100 dark:border-zinc-700 rounded-xl shadow-sm p-4 mb-8">
+            <div className="flex items-start gap-4">
+              <div
+                className={`w-10 h-10 rounded-full flex items-center justify-center ${getRandomBg(
+                  login.userId.toString(),
+                )}`}
+              >
+                <img
+                  src={login.thumbnail}
+                  alt="Your avatar"
+                  className="w-10 h-10 rounded-full object-cover border-2 border-white dark:border-zinc-800"
+                  style={{ background: "transparent" }}
+                />
+              </div>
+              <div className="flex-1">
+                <textarea
+                  className="w-full border-0 focus:ring-0 resize-none bg-transparent placeholder-gray-400 dark:placeholder-gray-500 text-zinc-900 dark:text-white"
+                  placeholder={composerPlaceholder}
+                  value={wallMessage}
+                  onChange={(e) => setWallMessage(e.target.value)}
+                  rows={3}
+                  maxLength={10000}
+                />
+                {selectedImage && (
+                  <div className="relative mt-2">
+                    <img
+                      src={selectedImage}
+                      alt="Selected"
+                      className="max-h-64 rounded-lg object-contain"
+                    />
+                    <button
+                      onClick={removeImage}
+                      className="absolute top-2 right-2 p-1 bg-black/50 rounded-full text-white hover:bg-black/70 transition-colors"
+                    >
+                      <IconX size={16} />
+                    </button>
+                  </div>
+                )}
+                <div className="flex items-center justify-between pt-3 border-t border-zinc-100 dark:border-zinc-700">
+                  <div className="flex items-center gap-4">
+                    <input
+                      type="file"
+                      ref={fileInputRef}
+                      className="hidden"
+                      accept="image/jpeg,image/png,image/gif,image/webp"
+                      onChange={handleImageSelect}
+                    />
+                    {canAddPhotos() && (
+                      <button
+                        className="p-2 text-zinc-500 hover:text-primary rounded-full hover:bg-zinc-100 dark:hover:bg-zinc-700 transition-colors"
+                        onClick={() => fileInputRef.current?.click()}
+                      >
+                        <IconPhoto size={20} />
+                      </button>
+                    )}
+                    <div className="relative z-10">
+                      <button
+                        className="p-2 text-zinc-500 hover:text-primary rounded-full hover:bg-zinc-100 dark:hover:bg-zinc-700 transition-colors"
+                        onClick={() => setShowEmojiPicker(!showEmojiPicker)}
+                      >
+                        <IconMoodSmile size={20} />
+                      </button>
+                      {showEmojiPicker && (
+                        <div className="absolute top-full left-0 mt-2 z-10">
+                          <EmojiPicker
+                            onEmojiClick={onEmojiClick}
+                            emojiStyle={EmojiStyle.NATIVE}
+                            theme={
+                              document.documentElement.classList.contains(
+                                "dark",
+                              )
+                                ? Theme.DARK
+                                : Theme.LIGHT
+                            }
+                            width={350}
+                            height={400}
+                            lazyLoadEmojis={true}
+                            searchPlaceholder="Search emojis..."
+                          />
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                  <Button
+                    classoverride="bg-primary hover:bg-primary/90 text-white dark:text-white px-6 dark:bg-primary dark:hover:bg-primary/80"
+                    workspace
+                    onPress={sendPost}
+                    loading={loading}
+                    disabled={!wallMessage.trim() && !selectedImage}
+                  >
+                    <IconSend size={18} className="mr-2" />
+                    Post
+                  </Button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        <div className="space-y-6">
+          {posts.length < 1 ? (
+            <div className="rounded-xl p-8 text-center">
+              <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-primary/10 flex items-center justify-center">
+                <IconInbox className="w-8 h-8 text-primary" />
+              </div>
+              <h3 className="text-lg font-medium text-zinc-900 dark:text-white mb-1">
+                No posts yet
+              </h3>
+              <p className="text-zinc-500 dark:text-zinc-400">
+                Be the first to share something with your team!
+              </p>
+            </div>
+          ) : (
+            posts.map((post: any) => (
+              <div
+                key={post.id}
+                className="bg-white dark:bg-zinc-800 border border-zinc-100 dark:border-zinc-700 rounded-xl shadow-sm p-6 hover:shadow-md transition-shadow"
+              >
+                <div className="flex items-start gap-4">
+                  <div
+                    className={`w-12 h-12 rounded-full flex items-center justify-center ${getRandomBg(
+                      post.author.userid,
+                    )}`}
+                  >
+                    <img
+                      alt="avatar headshot"
+                      src={post.author.picture}
+                      className="w-12 h-12 rounded-full object-cover border-2 border-white dark:border-zinc-800"
+                      style={{ background: "transparent" }}
+                    />
+                  </div>
+                  <div className="flex-1">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <h3 className="font-semibold text-zinc-900 dark:text-white">
+                            {post.author.username}
+                          </h3>
+                          {post.author.departments &&
+                            post.author.departments.length > 0 && (
+                              <span
+                                className="text-[10px] sm:text-xs px-2 py-0.5 rounded-full text-white font-medium whitespace-nowrap"
+                                style={{
+                                  backgroundColor:
+                                    post.author.departments[0].color ||
+                                    "#3b82f6",
+                                }}
+                              >
+                                {post.author.departments[0].name}
+                              </span>
+                            )}
+                        </div>
+                        {post.author.rankName && (
+                          <p className="text-sm text-zinc-600 dark:text-zinc-300 mt-0.5">
+                            {post.author.rankName}
+                          </p>
+                        )}
+                      </div>
+                      {(() => {
+                        const isAuthor =
+                          String(post.authorId) === String(login.userId);
+                        const hasManageWall =
+                          userPermissions.includes("delete_wall_posts");
+                        const canDelete = isAuthor || hasManageWall;
+
+                        return canDelete ? (
+                          <button
+                            onClick={() => {
+                              setPostToDelete(post.id);
+                              setShowDeleteModal(true);
+                            }}
+                            className="p-2 text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg transition-colors"
+                          >
+                            <IconTrash size={18} />
+                          </button>
+                        ) : null;
+                      })()}
+                    </div>
+                    <div className="prose text-zinc-800 dark:text-zinc-200 dark:prose-invert max-w-none mt-3">
+                      <ReactMarkdown rehypePlugins={[rehypeSanitize]}>
+                        {post.content}
+                      </ReactMarkdown>
+                    </div>
+                    {post.image && (
+                      <div className="mt-4">
+                        <img
+                          src={post.image}
+                          alt="Post image"
+                          className="max-h-96 rounded-lg object-contain"
+                          style={{
+                            minHeight: "100px",
+                            backgroundColor: "#f0f0f0",
+                          }}
+                        />
+                      </div>
+                    )}
+                    <div className="mt-3 flex items-center justify-between gap-3">
+                      <p className="text-xs sm:text-sm text-zinc-500 dark:text-zinc-400">
+                        <span className="sm:hidden">
+                          {moment(post.createdAt).format("DD/MM/YYYY h:mm A")}
+                        </span>
+                        <span className="hidden sm:inline">
+                          {moment(post.createdAt).format(
+                            "MMMM D, YYYY [at] h:mm A",
+                          )}
+                        </span>
+                      </p>
+                      {canReactOnWall() && (
+                        <div className="relative flex items-center gap-2">
+                          {(() => {
+                            const reactionSummary = getReactionCounts(post);
+                            const userReaction = getUserReaction(post);
+                            return (
+                              <>
+                                {reactionSummary.length > 0 && (
+                                  <div className="inline-flex items-center gap-1.5">
+                                    {reactionSummary.map(({ emoji, count }) => {
+                                      const isUserReaction = userReaction?.emoji === emoji;
+                                      return (
+                                        <button
+                                          key={`${post.id}-reaction-${emoji}`}
+                                          type="button"
+                                          onClick={() => toggleReaction(post.id, emoji)}
+                                          className={`inline-flex items-center gap-1 px-2 py-1 rounded-full text-sm border transition-colors ${
+                                            isUserReaction
+                                              ? "bg-primary/10 border-primary/30 text-primary"
+                                              : "bg-zinc-50 dark:bg-zinc-700/40 border-zinc-200 dark:border-zinc-700 text-zinc-700 dark:text-zinc-300 hover:border-primary/50"
+                                          }`}
+                                        >
+                                          <span>{emoji}</span>
+                                          <span className="text-xs font-medium">{count}</span>
+                                        </button>
+                                      );
+                                    })}
+                                  </div>
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setShowReactionPickerForPost(
+                                      showReactionPickerForPost === post.id ? null : post.id,
+                                    )
+                                  }
+                                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-sm border border-zinc-200 dark:border-zinc-700 text-zinc-700 dark:text-zinc-300 hover:border-primary/50"
+                                  title="Add a reaction"
+                                >
+                                  <IconMoodSmile size={14} />
+                                  {!userReaction && "React"}
+                                </button>
+                              </>
+                            );
+                          })()}
+                          {showReactionPickerForPost === post.id && (
+                            <div className="absolute top-full right-0 mt-2 z-20">
+                              <EmojiPicker
+                                onEmojiClick={(emojiObject: any) => {
+                                  toggleReaction(post.id, emojiObject.emoji);
+                                  setShowReactionPickerForPost(null);
+                                }}
+                                emojiStyle={EmojiStyle.NATIVE}
+                                theme={
+                                  document.documentElement.classList.contains("dark")
+                                    ? Theme.DARK
+                                    : Theme.LIGHT
+                                }
+                                width={320}
+                                height={360}
+                                lazyLoadEmojis={true}
+                                searchPlaceholder="Search reactions..."
+                              />
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+        {showDeleteModal && (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+            <div className="bg-white dark:bg-zinc-800 rounded-lg shadow-xl p-6 w-full max-w-sm text-center">
+              <h2 className="text-lg font-semibold text-zinc-900 dark:text-white mb-4">
+                Confirm Deletion
+              </h2>
+              <p className="text-sm text-zinc-600 dark:text-zinc-300">
+                Are you sure you want to delete this post?
+              </p>
+              <p className="text-sm text-zinc-600 dark:text-zinc-300 mb-6">
+                This action cannot be undone.
+              </p>
+              <div className="flex justify-center gap-4">
+                <button
+                  onClick={() => setShowDeleteModal(false)}
+                  className="px-4 py-2 rounded-md bg-zinc-100 dark:bg-zinc-700 hover:bg-zinc-200 dark:hover:bg-zinc-600 text-zinc-800 dark:text-white"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={confirmDelete}
+                  className="px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600"
+                >
+                  Delete
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+Wall.layout = Workspace;
+
+export default Wall;

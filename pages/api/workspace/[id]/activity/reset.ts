@@ -1,0 +1,595 @@
+// Next.js API route support: https://nextjs.org/docs/api-routes/introduction
+import type { NextApiRequest, NextApiResponse } from "next";
+import { fetchworkspace, getConfig, setConfig } from "@/utils/configEngine";
+import prisma from "@/utils/database";
+import { withSessionRoute } from "@/lib/withSession";
+import { withPermissionCheck } from "@/utils/permissionsManager";
+import { getResetStart } from "@/utils/activityrest";
+
+import {
+  getUsername,
+  getThumbnail,
+  getDisplayName,
+} from "@/utils/userinfoEngine";
+type Data = {
+  success: boolean;
+  error?: string;
+};
+
+export default withPermissionCheck(handler, "reset_activity");
+
+export async function handler(req: NextApiRequest, res: NextApiResponse<Data>) {
+  if (req.method !== "POST")
+    return res
+      .status(405)
+      .json({ success: false, error: "Method not allowed" });
+  if (!req.session.userid)
+    return res.status(401).json({ success: false, error: "Not logged in" });
+
+  const workspaceGroupId = Number(req.query.id as string);
+
+  try {
+    const periodStart = await getResetStart(workspaceGroupId);
+
+    const periodEnd = new Date();
+
+    console.log(
+      `[RESET] Period: ${periodStart.toISOString()} to ${periodEnd.toISOString()}`,
+    );
+
+    const workspaceUsers = await prisma.user.findMany({
+      where: {
+        OR: [
+          {
+            roles: {
+              some: { workspaceGroupId },
+            },
+          },
+          {
+            workspaceMemberships: {
+              some: { workspaceGroupId },
+            },
+          },
+        ],
+      },
+      include: {
+        roles: {
+          where: { workspaceGroupId },
+          include: { quotaRoles: { include: { quota: true } } },
+        },
+        workspaceMemberships: {
+          where: { workspaceGroupId },
+          include: {
+            departmentMembers: {
+              include: {
+                department: {
+                  include: {
+                    quotaDepartments: {
+                      include: {
+                        quota: true,
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+
+    console.log(`[RESET] Found ${workspaceUsers.length} workspace-accessible users`);
+
+    const quotas = await prisma.quota.findMany({
+      where: { workspaceGroupId },
+    });
+    const historyRecords: {
+      userId: bigint;
+      workspaceGroupId: number;
+      periodStart: Date;
+      periodEnd: Date;
+      minutes: number;
+      messages: number;
+      sessionsHosted: number;
+      sessionsSecondaryHosted: number;
+      sessionsAttended: number;
+      idleTime: number;
+      wallPosts: number;
+      quotaProgress: any;
+    }[] = [];
+
+    for (const user of workspaceUsers) {
+      const userId = user.userid;
+      const membership = user.workspaceMemberships[0];
+      const departmentMembers = membership?.departmentMembers || [];
+      const sessions = await prisma.activitySession.findMany({
+        where: {
+          userId,
+          workspaceGroupId,
+          endTime: { not: null },
+          archived: { not: true },
+          startTime: {
+            gte: periodStart,
+            lte: periodEnd,
+          },
+        },
+      });
+
+      let sessionMinutes = 0;
+      let totalMessages = 0;
+      let totalIdleTime = 0;
+
+      sessions.forEach((session) => {
+        if (session.endTime) {
+          const duration = Math.round(
+            (session.endTime.getTime() - session.startTime.getTime()) / 60000,
+          );
+          sessionMinutes += duration;
+        }
+        totalMessages += session.messages || 0;
+        totalIdleTime += Number(session.idleTime) || 0;
+      });
+      const adjustments = await prisma.activityAdjustment.findMany({
+        where: {
+          userId,
+          workspaceGroupId,
+          archived: { not: true },
+          createdAt: {
+            gte: periodStart,
+            lte: periodEnd,
+          },
+        },
+      });
+
+      const adjustmentMinutes = adjustments.reduce(
+        (sum, adj) => sum + adj.minutes,
+        0,
+      );
+      const totalMinutes = sessionMinutes + adjustmentMinutes;
+
+      const allSessionParticipations = await prisma.sessionUser.findMany({
+        where: {
+          userid: userId,
+          session: {
+            sessionType: { workspaceGroupId },
+            date: {
+              gte: periodStart,
+              lte: periodEnd,
+            },
+          },
+          archived: { not: true },
+        },
+        include: {
+          session: {
+            select: {
+              id: true,
+              type: true,
+              sessionType: {
+                select: {
+                  slots: true,
+                  name: true,
+                },
+              },
+            },
+          },
+        },
+      });
+
+      const sessionsHosted = allSessionParticipations.filter(
+        (participation) => {
+          const sessionSlots = participation.session.sessionType.slots as any[];
+          const matchingSlot = sessionSlots.find(
+            (s: any) => s.id === participation.roleID,
+          );
+          return matchingSlot?.hostRole === "primary";
+        },
+      ).length;
+
+      const sessionsSecondaryHosted = allSessionParticipations.filter(
+        (participation) => {
+          const sessionSlots = participation.session.sessionType.slots as any[];
+          const matchingSlot = sessionSlots.find(
+            (s: any) => s.id === participation.roleID,
+          );
+          return matchingSlot?.hostRole === "secondary";
+        },
+      ).length;
+
+      const sessionsAttended = allSessionParticipations.filter(
+        (participation) => {
+          const sessionSlots = participation.session.sessionType.slots as any[];
+          const matchingSlot = sessionSlots.find(
+            (s: any) => s.id === participation.roleID,
+          );
+          return !matchingSlot?.hostRole;
+        },
+      ).length;
+
+      const sessionsLogged = new Set(
+        allSessionParticipations.map((p) => p.sessionid),
+      ).size;
+      const primaryHostedByType: Record<string, number> = {};
+      const secondaryHostedByType: Record<string, number> = {};
+      const attendedByType: Record<string, number> = {};
+      const loggedByType: Record<string, Set<string>> = {};
+      for (const p of allSessionParticipations) {
+        const type = (p.session as any).type || "other";
+        const pSlots = ((p.session as any)?.sessionType?.slots as any[]) || [];
+        const pSlot = pSlots.find((s: any) => s.id === p.roleID);
+
+        if (!loggedByType[type]) loggedByType[type] = new Set<string>();
+        loggedByType[type].add(p.sessionid);
+
+        if (pSlot?.hostRole === "primary") {
+          primaryHostedByType[type] = (primaryHostedByType[type] || 0) + 1;
+        } else if (pSlot?.hostRole === "secondary") {
+          secondaryHostedByType[type] = (secondaryHostedByType[type] || 0) + 1;
+        } else {
+          attendedByType[type] = (attendedByType[type] || 0) + 1;
+        }
+      }
+
+      const allianceVisits = await prisma.allyVisit.count({
+        where: {
+          ally: {
+            workspaceGroupId: workspaceGroupId,
+          },
+          time: {
+            gte: periodStart,
+            lte: periodEnd,
+          },
+          OR: [{ hostId: userId }, { participants: { has: userId } }],
+        },
+      });
+
+      const recommendationSubmissions = await prisma.recommendation.count({
+        where: {
+          workspaceGroupId,
+          createdById: userId,
+          createdAt: { gte: periodStart, lte: periodEnd },
+        },
+      });
+
+      const recommendationVotes = await prisma.recommendationVote.count({
+        where: {
+          userId,
+          recommendation: { workspaceGroupId },
+          createdAt: { gte: periodStart, lte: periodEnd },
+        },
+      });
+
+      const wallPosts = await prisma.wallPost.findMany({
+        where: {
+          authorId: userId,
+          workspaceGroupId,
+          createdAt: {
+            gte: periodStart,
+            lte: periodEnd,
+          },
+        },
+      });
+      const totalWallPosts = wallPosts.length;
+
+      const quotaProgress: any = {};
+      const quotaMap = new Map<string, any>();
+      const quotaSourceMap = new Map<
+        string,
+        { linkedVia: string; linkedName: string; linkedColor: string | null }
+      >();
+
+      for (const role of user.roles) {
+        for (const qr of role.quotaRoles) {
+          const quota = qr.quota;
+          if (!quotaMap.has(quota.id)) {
+            quotaMap.set(quota.id, quota);
+            quotaSourceMap.set(quota.id, {
+              linkedVia: "role",
+              linkedName: role.name,
+              linkedColor: (role as any).color ?? null,
+            });
+          }
+        }
+      }
+
+      for (const dm of departmentMembers) {
+        for (const qd of dm.department.quotaDepartments) {
+          const quota = qd.quota;
+          if (!quotaMap.has(quota.id)) {
+            quotaMap.set(quota.id, quota);
+            quotaSourceMap.set(quota.id, {
+              linkedVia: "department",
+              linkedName: dm.department.name,
+              linkedColor: dm.department.color ?? null,
+            });
+          }
+        }
+      }
+
+      const userQuotas = Array.from(quotaMap.values());
+      const quotaIds = userQuotas.map((q) => q.id);
+      const customQuotaCompletions =
+        quotaIds.length > 0
+          ? await prisma.userQuotaCompletion.findMany({
+              where: {
+                quotaId: { in: quotaIds },
+                userId,
+                workspaceGroupId,
+                archived: { not: true },
+              },
+              include: {
+                completedByUser: {
+                  select: {
+                    userid: true,
+                    username: true,
+                  },
+                },
+              },
+            })
+          : [];
+
+      const completionMap = new Map();
+      customQuotaCompletions.forEach((completion) => {
+        completionMap.set(completion.quotaId, completion);
+      });
+
+      for (const quota of userQuotas) {
+        let currentValue = 0;
+        let percentage = 0;
+        let completed = false;
+        let completedAt = null;
+        let completedBy = null;
+        let completedByUsername = null;
+        let completionNotes = null;
+
+        switch (quota.type) {
+          case "custom":
+            const completion = completionMap.get(quota.id);
+            if (completion) {
+              completed = completion.completed || false;
+              completedAt = completion.completedAt;
+              completedBy = completion.completedBy
+                ? completion.completedBy.toString()
+                : null;
+              completedByUsername =
+                completion.completedByUser?.username || null;
+              completionNotes = completion.notes;
+              percentage = completed ? 100 : 0;
+              currentValue = completed ? 1 : 0;
+            }
+            break;
+          case "mins":
+            currentValue = totalMinutes;
+            percentage =
+              quota.value && quota.value > 0
+                ? (currentValue / quota.value) * 100
+                : 0;
+            break;
+
+          case "sessions_hosted":
+            currentValue =
+              quota.sessionType && quota.sessionType !== "all"
+                ? primaryHostedByType[quota.sessionType] || 0
+                : sessionsHosted;
+            percentage =
+              quota.value && quota.value > 0
+                ? (currentValue / quota.value) * 100
+                : 0;
+            break;
+
+          case "sessions_secondary_host":
+            currentValue =
+              quota.sessionType && quota.sessionType !== "all"
+                ? secondaryHostedByType[quota.sessionType] || 0
+                : sessionsSecondaryHosted;
+            percentage =
+              quota.value && quota.value > 0
+                ? (currentValue / quota.value) * 100
+                : 0;
+            break;
+
+          case "sessions_attended":
+            currentValue =
+              quota.sessionType && quota.sessionType !== "all"
+                ? attendedByType[quota.sessionType] || 0
+                : sessionsAttended;
+            percentage =
+              quota.value && quota.value > 0
+                ? (currentValue / quota.value) * 100
+                : 0;
+            break;
+
+          case "sessions_logged":
+            currentValue =
+              quota.sessionType && quota.sessionType !== "all"
+                ? loggedByType[quota.sessionType]?.size || 0
+                : sessionsLogged;
+            percentage =
+              quota.value && quota.value > 0
+                ? (currentValue / quota.value) * 100
+                : 0;
+            break;
+
+          case "alliance_visits":
+            currentValue = allianceVisits;
+            percentage =
+              quota.value && quota.value > 0
+                ? (currentValue / quota.value) * 100
+                : 0;
+            break;
+
+          case "recommendation_submissions":
+            currentValue = recommendationSubmissions;
+            percentage =
+              quota.value && quota.value > 0
+                ? (currentValue / quota.value) * 100
+                : 0;
+            break;
+
+          case "recommendation_votes":
+            currentValue = recommendationVotes;
+            percentage =
+              quota.value && quota.value > 0
+                ? (currentValue / quota.value) * 100
+                : 0;
+            break;
+        }
+
+        quotaProgress[quota.id] = {
+          value: currentValue,
+          percentage,
+          name: quota.name,
+          type: quota.type,
+          requirement: quota.value,
+          completionType: (quota as any).completionType || null,
+          ...quotaSourceMap.get(quota.id),
+        };
+
+        if (quota.type === "custom") {
+          quotaProgress[quota.id].completed = completed;
+          if (completedAt) quotaProgress[quota.id].completedAt = completedAt;
+          if (completedBy) quotaProgress[quota.id].completedBy = completedBy;
+          if (completedByUsername)
+            quotaProgress[quota.id].completedByUsername = completedByUsername;
+          if (completionNotes)
+            quotaProgress[quota.id].completionNotes = completionNotes;
+        }
+      }
+
+      const hasQuotas = userQuotas.length > 0;
+      const hasActivity =
+        totalMinutes > 0 ||
+        totalMessages > 0 ||
+        sessionsHosted > 0 ||
+        sessionsAttended > 0 ||
+        totalWallPosts > 0;
+
+      if (hasActivity || hasQuotas) {
+        console.log(
+          `[RESET] Saving history for user ${userId}: activity=${hasActivity}, quotas=${hasQuotas} (${userQuotas.length} quotas)`,
+        );
+        historyRecords.push({
+          userId,
+          workspaceGroupId,
+          periodStart,
+          periodEnd,
+          minutes: totalMinutes,
+          messages: totalMessages,
+          sessionsHosted,
+          sessionsSecondaryHosted,
+          sessionsAttended,
+          idleTime: Math.round(totalIdleTime / 60),
+          wallPosts: totalWallPosts,
+          quotaProgress,
+        });
+      } else {
+        console.log(
+          `[RESET] Skipping user ${userId}: no activity and no quotas`,
+        );
+      }
+    }
+
+    console.log(
+      `[RESET] Total history records to save: ${historyRecords.length}`,
+    );
+
+    await prisma.$transaction(async (tx) => {
+      if (historyRecords.length > 0) {
+        console.log(
+          `[RESET] Creating ${historyRecords.length} ActivityHistory records`,
+        );
+        await tx.activityHistory.createMany({
+          data: historyRecords,
+        });
+        console.log(`[RESET] History records created successfully`);
+      } else {
+        console.log(`[RESET] No history records to create`);
+      }
+      const resetRecord = await tx.activityReset.create({
+        data: {
+          workspaceGroupId,
+          resetById: req.session.userid,
+          previousPeriodStart: periodStart,
+          previousPeriodEnd: periodEnd,
+        },
+      });
+      await tx.sessionUser.updateMany({
+        where: {
+          session: {
+            sessionType: { workspaceGroupId },
+            date: { lte: new Date() },
+          },
+          archived: { not: true },
+        },
+        data: {
+          archived: true,
+          archiveStartDate: periodStart,
+          archiveEndDate: periodEnd,
+        },
+      });
+
+      await tx.activitySession.updateMany({
+        where: {
+          workspaceGroupId,
+          archived: { not: true },
+        },
+        data: {
+          archived: true,
+          archiveStartDate: periodStart,
+          archiveEndDate: periodEnd,
+        },
+      });
+
+      await tx.activityAdjustment.updateMany({
+        where: {
+          workspaceGroupId,
+          archived: { not: true },
+        },
+        data: {
+          archived: true,
+          archiveStartDate: periodStart,
+          archiveEndDate: periodEnd,
+        },
+      });
+
+      await tx.session.updateMany({
+        where: {
+          sessionType: { workspaceGroupId },
+          date: { lte: new Date() },
+          archived: { not: true },
+        },
+        data: {
+          archived: true,
+          archiveStartDate: periodStart,
+          archiveEndDate: periodEnd,
+        },
+      });
+
+      await (tx as any).userQuotaCompletion.updateMany({
+        where: {
+          workspaceGroupId,
+          archived: { not: true },
+        },
+        data: {
+          archived: true,
+          archiveCycleId: resetRecord.id,
+          archiveStartDate: periodStart,
+          archiveEndDate: periodEnd,
+        },
+      });
+    });
+
+    console.log(
+      `[RESET] Manual reset completed successfully for workspace ${workspaceGroupId}`,
+    );
+
+    return res.status(200).json({ success: true });
+  } catch (error) {
+    console.error(
+      `[RESET] Error during manual reset for workspace ${workspaceGroupId}:`,
+      error,
+    );
+    return res
+      .status(500)
+      .json({ success: false, error: "Something went wrong" });
+  }
+}

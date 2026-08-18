@@ -1,0 +1,796 @@
+import React, { FC, useEffect, useState } from "react";
+import { Disclosure, Transition } from "@headlessui/react";
+import {
+  IconChevronDown,
+  IconPlus,
+  IconRefresh,
+  IconTrash,
+  IconAlertTriangle,
+} from "@tabler/icons-react";
+import Btn from "@/components/button";
+import { workspacestate } from "@/state";
+import { type RobloxRole as Role } from "@/utils/roblox";
+import { role } from "@/utils/database";
+import { useRecoilState } from "recoil";
+import { useRouter } from "next/router";
+import toast, { Toaster } from "react-hot-toast";
+import axios from "axios";
+import clsx from "clsx";
+
+type Props = {
+  setRoles: React.Dispatch<React.SetStateAction<role[]>>;
+  roles: role[];
+  grouproles: Role[];
+};
+
+const RolesManager: FC<Props> = ({ roles, setRoles, grouproles }) => {
+  const [workspace] = useRecoilState(workspacestate);
+  const router = useRouter();
+  const [hasApiKey, setHasApiKey] = useState<boolean | null>(null);
+  const [expandedCategories, setExpandedCategories] = React.useState<Set<string>>(
+    new Set()
+  );
+
+  useEffect(() => {
+    const checkApiKey = async () => {
+      try {
+        const res = await axios.get(
+          `/api/workspace/${workspace.groupId}/settings/external`
+        );
+        setHasApiKey(!!res.data?.robloxApiKey && res.data.robloxApiKey !== "");
+      } catch {
+        setHasApiKey(false);
+      }
+    };
+    if (workspace?.groupId) checkApiKey();
+  }, [workspace?.groupId]);
+  const [expandedSubcategories, setExpandedSubcategories] = React.useState<Set<string>>(
+    new Set()
+  );
+  const showRecommendationPermissions = Boolean(
+    workspace?.settings?.recommendationsEnabled
+  );
+  const showPolicyPermissions = Boolean(
+    workspace?.settings?.policiesEnabled
+  );
+
+  const sessionTypes = ["shift", "training", "event", "other"];
+  const sessionSubcategories: Record<string, Record<string, string>> = {};
+  
+  sessionTypes.forEach(type => {
+    const typeCapitalized = type.charAt(0).toUpperCase() + type.slice(1);
+    sessionSubcategories[`${typeCapitalized}`] = {
+      [`See ${typeCapitalized} Sessions`]: `sessions_${type}_see`,
+      [`Assign others to ${typeCapitalized} Sessions`]: `sessions_${type}_assign`,
+      [`Assign Self to ${typeCapitalized} Sessions`]: `sessions_${type}_claim`,
+      [`Create Unscheduled ${typeCapitalized}`]: `sessions_${type}_unscheduled`,
+      [`Create Scheduled ${typeCapitalized}`]: `sessions_${type}_scheduled`,
+      [`Manage ${typeCapitalized} Sessions`]: `sessions_${type}_manage`,
+      [`Add Notes to ${typeCapitalized} Sessions`]: `sessions_${type}_notes`,
+      [`Assign Tag to ${typeCapitalized} Sessions`]: `sessions_${type}_assign_tag`,
+      [`Edit Concluded ${typeCapitalized} Sessions`]: `sessions_${type}_edit_concluded`,
+    };
+  });
+
+  const permissionCategories: Record<string, Record<string, string> | { _subcategories: Record<string, Record<string, string>> }> = {
+    Wall: {
+      "View wall": "view_wall",
+      "Post on wall": "post_on_wall",
+      "React to wall posts": "react_wall",
+      "Add photos to wall posts": "add_wall_photos",
+      "Delete wall posts": "delete_wall_posts",
+      "Edit sticky post": "edit_sticky_post",
+    },
+    Sessions: {
+      _subcategories: sessionSubcategories
+    },
+    Staff: {
+      "View members": "view_members",
+      "View directory": "view_directory",
+      "Use saved views": "use_views",
+      "Create views": "create_views",
+      "Edit views": "edit_views",
+      "Delete views": "delete_views",
+      "Use mass actions": "use_mass_actions",
+      "Create notices": "create_notices",
+      "Approve notices": "approve_notices",
+      "Manage notices": "manage_notices",
+      "View recommendations": "view_recommendations",
+      "Post recommendations": "post_recommendations",
+      "Comment on recommendations": "comment_recommendations",
+      "Vote on recommendations": "vote_recommendations",
+      "Manage recommendations": "manage_recommendations",
+      "Delete recommendations": "delete_recommendations",
+    },
+    Docs: {
+      "Create docs": "create_docs",
+      "Edit docs": "edit_docs",
+      "Delete docs": "delete_docs",
+      "Create policies": "create_policies",
+      "Edit policies": "edit_policies",
+      "Delete policies": "delete_policies",
+      "View policy compliance": "view_compliance",
+    },
+    Quotas: {
+      "Create quotas": "create_quotas",
+      "Delete quotas": "delete_quotas",
+      "Signoff custom quotas": "signoff_custom_quotas",
+    },
+    Members: {
+      "Profiles - View": "view_member_profiles",
+      "Info - Edit details": "edit_member_details",
+      "Notices - Record approved": "record_notices",
+      "Activity - Adjustments": "activity_adjustments",
+      "Logbook - See Entries": "view_logbook",
+      "Logbook - Redact Entries": "logbook_redact",
+      "Logbook - Note": "logbook_note",
+      "Logbook - Warning": "logbook_warning",
+      "Logbook - Promotion": "logbook_promotion",
+      "Logbook - Demotion": "logbook_demotion",
+      "Logbook - Termination": "logbook_termination",
+      "Logbook - Resignation": "logbook_resignation",
+      "Logbook - Use Ranking Integration": "rank_users",
+    },
+    Alliances: {
+      "Create alliances": "create_alliances",
+      "Delete alliances": "delete_alliances",
+      "Represent alliance": "represent_alliance",
+      "Edit alliance details": "edit_alliance_details",
+      "Add notes": "add_alliance_notes",
+      "Edit notes": "edit_alliance_notes",
+      "Delete notes": "delete_alliance_notes",
+      "Add visits": "add_alliance_visits",
+      "Edit visits": "edit_alliance_visits",
+      "Delete visits": "delete_alliance_visits",
+    },
+    Moderation: {
+      "View moderation": "view_moderation",
+      "Create moderation cases": "create_moderation_cases",
+      "Edit moderation cases": "edit_moderation_cases",
+      "Delete moderation cases": "delete_moderation_cases",
+      "Execute punishments": "execute_punishments",
+      "Revoke punishments": "revoke_punishments",
+      "Upload evidence": "upload_evidence",
+      "Delete evidence": "delete_evidence",
+    },
+    Applications: {
+      "View applications": "applications.view",
+      "Manage applications": "applications.manage",
+      "Review applications": "applications.review",
+      "Delete applications": "applications.delete",
+    },
+    Settings: {
+      "Admin (Manage workspace)": "admin",
+      "Reset activity": "reset_activity",
+      "View audit logs": "view_audit_logs",
+      "Create API keys": "manage_apikeys",
+      "Manage features": "manage_features",
+      "Workspace customisation": "workspace_customisation",
+      "Export views": "export_views",
+    },
+  };
+
+  const toggleCategory = (category: string) => {
+    const newExpanded = new Set(expandedCategories);
+    if (newExpanded.has(category)) {
+      newExpanded.delete(category);
+    } else {
+      newExpanded.add(category);
+    }
+    setExpandedCategories(newExpanded);
+  };
+
+  const toggleSubcategory = (subcategory: string) => {
+    const newExpanded = new Set(expandedSubcategories);
+    if (newExpanded.has(subcategory)) {
+      newExpanded.delete(subcategory);
+    } else {
+      newExpanded.add(subcategory);
+    }
+    setExpandedSubcategories(newExpanded);
+  };
+
+  const toggleCategoryPermissions = (roleId: string, category: string) => {
+    const index = roles.findIndex((role: any) => role.id === roleId);
+    if (index === -1) return;
+    
+    const rroles = Object.assign([] as typeof roles, roles);
+    if (rroles[index].isOwnerRole) {
+      toast.error("Owner role permissions cannot be modified");
+      return;
+    }
+
+    const categoryData = permissionCategories[category as keyof typeof permissionCategories];
+    if (!categoryData) return;
+    let categoryPerms: string[] = [];
+    if (categoryData && typeof categoryData === 'object' && '_subcategories' in categoryData) {
+      const subcats = (categoryData as any)._subcategories;
+      categoryPerms = Object.values(subcats).flatMap((subcat: any) => Object.values(subcat));
+    } else {
+      categoryPerms = Object.values(categoryData as Record<string, string>);
+    }
+    
+    const allChecked = categoryPerms.every((perm) =>
+      rroles[index].permissions.includes(perm)
+    );
+
+    if (allChecked) {
+      rroles[index].permissions = rroles[index].permissions.filter(
+        (perm: any) => !categoryPerms.includes(perm)
+      );
+    } else {
+      categoryPerms.forEach((perm) => {
+        if (!rroles[index].permissions.includes(perm)) {
+          rroles[index].permissions.push(perm);
+        }
+      });
+    }
+    setRoles(rroles);
+  };
+
+  const newRole = async () => {
+    const res = await axios.post(
+      "/api/workspace/" + workspace.groupId + "/settings/roles/new",
+      {}
+    );
+    if (res.status === 200) {
+      setRoles([...roles, res.data.role]);
+      toast.success("New role created");
+    }
+  };
+
+  const updateRole = async (value: string, id: string) => {
+    const index = roles.findIndex((role: any) => role.id === id);
+    if (index === null) return;
+    const rroles = Object.assign([] as typeof roles, roles);
+
+    if (rroles[index].isOwnerRole) {
+      toast.error("Owner role name cannot be modified");
+      const input = document.querySelector(
+        `input[value="${value}"]`
+      ) as HTMLInputElement;
+      if (input) input.value = rroles[index].name;
+      return;
+    }
+
+    rroles[index].name = value;
+    setRoles(rroles);
+  };
+
+  const updateRoleColor = async (color: string, id: string) => {
+    const index = roles.findIndex((role: any) => role.id === id);
+    if (index === null) return;
+    const rroles = Object.assign([] as typeof roles, roles);
+    rroles[index].color = color;
+    setRoles(rroles);
+  };
+
+  const togglePermission = async (id: string, permission: string) => {
+    const index = roles.findIndex((role: any) => role.id === id);
+    if (index === null) return;
+    const rroles = Object.assign([] as typeof roles, roles);
+
+    if (rroles[index].isOwnerRole) {
+      toast.error("Owner role permissions cannot be modified");
+      return;
+    }
+
+    if (rroles[index].permissions.includes(permission)) {
+      rroles[index].permissions = rroles[index].permissions.filter(
+        (perm: any) => perm !== permission
+      );
+    } else {
+      rroles[index].permissions.push(permission);
+    }
+    setRoles(rroles);
+  };
+
+  const toggleGroupRole = async (id: string, role: Role) => {
+    const index = roles.findIndex((role: any) => role.id === id);
+    if (index === null) return;
+    const rroles = Object.assign([] as typeof roles, roles);
+
+    if (rroles[index].isOwnerRole) {
+      toast.error("Owner role group assignments cannot be modified.");
+      return;
+    }
+
+    if (rroles[index].groupRoles.includes(role.id)) {
+      rroles[index].groupRoles = rroles[index].groupRoles.filter(
+        (r) => r !== role.id
+      );
+    } else {
+      if (aroledoesincludegrouprole(id, role)) {
+        const assignedRole = roles.find(
+          (r) => r.id !== id && r.groupRoles.includes(role.id)
+        );
+        toast.error(`This rank is already assigned to another role.`);
+        return;
+      }
+      rroles[index].groupRoles.push(role.id);
+    }
+    setRoles(rroles);
+  };
+
+  const saveRole = async (id: string) => {
+    const index = roles.findIndex((r: any) => r.id === id);
+    if (index === -1) return;
+    const payload = {
+      name: roles[index].name,
+      permissions: roles[index].permissions,
+      groupRoles: roles[index].groupRoles,
+      color: roles[index].color,
+    };
+    try {
+      await axios.post(
+        `/api/workspace/${workspace.groupId}/settings/roles/${id}/update`,
+        payload
+      );
+      toast.success("Role saved!");
+    } catch (e) {
+      toast.error("Failed to save role.");
+    }
+  };
+
+  const checkRoles = async () => {
+    const res = axios.post(
+      `/api/workspace/${workspace.groupId}/settings/roles/checkgrouproles`
+    );
+    toast.promise(res, {
+      loading: "Checking roles...",
+      success: "Sync requested! Please wait.",
+      error: "Error updating roles",
+    });
+  };
+
+  const deleteRole = async (id: string) => {
+    const res = axios
+      .post(`/api/workspace/${workspace.groupId}/settings/roles/${id}/delete`)
+      .then(() => {
+        router.reload();
+      });
+    toast.promise(res, {
+      loading: "Deleting role...",
+      success: "Role deleted!",
+      error: "Error deleting role",
+    });
+  };
+
+  const aroledoesincludegrouprole = (id: string, role: Role) => {
+    const rs = roles.filter((role: any) => role.id !== id);
+    for (let i = 0; i < rs.length; i++) {
+      if (rs[i].groupRoles.includes(role.id)) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  return (
+    <div className="space-y-4 mt-4">
+      <div className="flex items-center justify-between">
+        <h3 className="text-lg font-medium text-zinc-900 dark:text-white">
+          Roles
+        </h3>
+        <div className="flex items-center space-x-3">
+          <button
+            onClick={newRole}
+            className="inline-flex items-center px-3 py-1.5 text-sm font-medium rounded-md text-white bg-primary hover:bg-primary/90 transition-colors"
+          >
+            <IconPlus size={16} className="mr-1.5" />
+            Add Role
+          </button>
+          {hasApiKey === false ? (
+            <button
+              onClick={() =>
+                router.push(
+                  `/workspace/${workspace.groupId}/settings?section=instance`
+                )
+              }
+              className="inline-flex items-center px-3 py-1.5 text-sm font-medium rounded-md text-amber-700 bg-amber-100 hover:bg-amber-200 dark:text-amber-300 dark:bg-amber-900/40 dark:hover:bg-amber-900/60 transition-colors"
+            >
+              <IconAlertTriangle size={16} className="mr-1.5" />
+              Setup API Key
+            </button>
+          ) : (
+            <button
+              onClick={checkRoles}
+              disabled={hasApiKey === null}
+              className={clsx(
+                "inline-flex items-center px-3 py-1.5 text-sm font-medium rounded-md transition-colors",
+                hasApiKey === null
+                  ? "text-zinc-400 bg-zinc-100 dark:text-zinc-500 dark:bg-zinc-800 cursor-wait"
+                  : "text-zinc-700 bg-zinc-100 hover:bg-zinc-200 dark:text-zinc-200 dark:bg-zinc-700 dark:hover:bg-zinc-600"
+              )}
+            >
+              <IconRefresh size={16} className="mr-1.5" />
+              Sync Group
+            </button>
+          )}
+        </div>
+      </div>
+
+      <div className="space-y-3">
+        {roles.map((role) => (
+          <Disclosure
+            as="div"
+            key={role.id}
+            className="bg-white dark:bg-zinc-800 rounded-lg border border-gray-200 dark:border-zinc-700 shadow-sm"
+          >
+            {({ open }) => (
+              <>
+                <Disclosure.Button className="w-full px-4 py-3 text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 rounded-lg">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center space-x-2">
+                      <span className="text-sm font-medium text-zinc-900 dark:text-white">
+                        {role.name}
+                      </span>
+                      {role.isOwnerRole && (
+                        <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-primary/10 text-primary">
+                          Owner
+                        </span>
+                      )}
+                    </div>
+                    <IconChevronDown
+                      className={clsx(
+                        "w-5 h-5 text-zinc-500 transition-transform",
+                        open ? "transform rotate-180" : ""
+                      )}
+                    />
+                  </div>
+                </Disclosure.Button>
+
+                <Transition
+                  enter="transition duration-100 ease-out"
+                  enterFrom="transform scale-95 opacity-0"
+                  enterTo="transform scale-100 opacity-100"
+                  leave="transition duration-75 ease-out"
+                  leaveFrom="transform scale-100 opacity-100"
+                  leaveTo="transform scale-95 opacity-0"
+                >
+                  <Disclosure.Panel className="px-4 pb-4">
+                    <div className="space-y-4">
+                      <div>
+                        <input
+                          type="text"
+                          placeholder="Role name"
+                          value={role.name}
+                          onChange={(e) => updateRole(e.target.value, role.id)}
+                          disabled={role.isOwnerRole === true}
+                          className="w-full px-3 py-2 text-sm rounded-md border border-gray-300 dark:border-zinc-600 bg-white dark:bg-zinc-700 text-zinc-900 dark:text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-primary/50 disabled:opacity-50 disabled:cursor-not-allowed"
+                        />
+                        {role.isOwnerRole === true && (
+                          <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+                            Owner role name cannot be changed
+                          </p>
+                        )}
+                      </div>
+
+                      <div>
+                        <h4 className="text-sm font-medium text-zinc-900 dark:text-white mb-2">
+                          Role Color
+                        </h4>
+                        <div className="flex items-center space-x-3">
+                          <input
+                            type="color"
+                            className="w-12 h-8 rounded border border-zinc-300 dark:border-zinc-700 cursor-pointer"
+                            value={role.color || "#6b7280"}
+                            onChange={(e) => updateRoleColor(e.target.value, role.id)}
+                          />
+                          <input
+                            type="text"
+                            className="flex-1 px-3 py-2 bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700 rounded-md text-zinc-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent disabled:opacity-50 disabled:cursor-not-allowed"
+                            value={role.color || "#6b7280"}
+                            onChange={(e) => updateRoleColor(e.target.value, role.id)}
+                            placeholder="#6b7280"
+                          />
+                        </div>
+                      </div>
+
+                      <div>
+                        <h4 className="text-sm font-medium text-zinc-900 dark:text-white mb-2">
+                          Permissions
+                        </h4>
+                        <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-3">
+                          Manage the permissions assigned to this role
+                        </p>
+                        <div className="space-y-2">
+                          {Object.entries(permissionCategories)
+                            .map(([category, perms]) => {
+                            const permsToRender = Object.fromEntries(
+                              Object.entries(perms as Record<string, string>).filter(([, value]) => {
+                                if (!showRecommendationPermissions && String(value).includes("recommendations")) {
+                                  return false;
+                                }
+                                if (!showPolicyPermissions && [
+                                  "create_policies",
+                                  "edit_policies",
+                                  "delete_policies",
+                                  "view_compliance",
+                                ].includes(String(value))) {
+                                  return false;
+                                }
+                                return true;
+                              })
+                            );
+                            const isExpanded = expandedCategories.has(category);
+                            const hasSubcategories = permsToRender && typeof permsToRender === 'object' && '_subcategories' in permsToRender;
+                            let categoryPerms: string[] = [];
+                            
+                            if (hasSubcategories) {
+                              const subcats = (permsToRender as any)._subcategories;
+                              categoryPerms = Object.values(subcats).flatMap((subcat: any) => Object.values(subcat));
+                            } else {
+                              categoryPerms = Object.values(permsToRender as Record<string, string>);
+                            }
+                            
+                            const allChecked = categoryPerms.every((perm) =>
+                              role.permissions.includes(perm)
+                            );
+                            const someChecked = categoryPerms.some((perm) =>
+                              role.permissions.includes(perm)
+                            );
+
+                            if (categoryPerms.length === 0) {
+                              return null;
+                            }
+
+                            return (
+                              <div
+                                key={category}
+                                className="border border-zinc-200 dark:border-zinc-700 rounded-md overflow-hidden"
+                              >
+                                <div className="bg-zinc-50 dark:bg-zinc-900/50 px-3 py-2 flex items-center justify-between">
+                                  <div className="flex items-center space-x-2 flex-1">
+                                    <input
+                                      type="checkbox"
+                                      checked={allChecked}
+                                      ref={(el) => {
+                                        if (el) el.indeterminate = someChecked && !allChecked;
+                                      }}
+                                      onChange={() =>
+                                        toggleCategoryPermissions(role.id, category)
+                                      }
+                                      disabled={role.isOwnerRole === true}
+                                      className="w-4 h-4 rounded text-primary border-gray-300 dark:border-zinc-600 focus:ring-primary/50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                    />
+                                    <button
+                                      onClick={() => toggleCategory(category)}
+                                      className="flex-1 flex items-center justify-between text-left focus:outline-none"
+                                    >
+                                      <span className="text-sm font-medium text-zinc-900 dark:text-white">
+                                        {category}
+                                      </span>
+                                      <IconChevronDown
+                                        className={clsx(
+                                          "w-4 h-4 text-zinc-500 transition-transform",
+                                          isExpanded ? "transform rotate-180" : ""
+                                        )}
+                                      />
+                                    </button>
+                                  </div>
+                                </div>
+                                {isExpanded && (
+                                  <div className="px-3 py-2 space-y-2 bg-white dark:bg-zinc-800">
+                                    {hasSubcategories ? (
+                                      Object.entries((permsToRender as any)._subcategories).map(([subcat, subPerms]: [string, any]) => {
+                                        const subcatKey = `${category}-${subcat}`;
+                                        const isSubExpanded = expandedSubcategories.has(subcatKey);
+                                        const subcatPerms = Object.values(subPerms);
+                                        const allSubChecked = subcatPerms.every((perm: any) =>
+                                          role.permissions.includes(perm)
+                                        );
+                                        const someSubChecked = subcatPerms.some((perm: any) =>
+                                          role.permissions.includes(perm)
+                                        );
+                                        
+                                        return (
+                                          <div key={subcat} className="border border-zinc-200 dark:border-zinc-700 rounded-md overflow-hidden ml-6">
+                                            <div className="bg-zinc-100 dark:bg-zinc-900 px-3 py-1.5 flex items-center space-x-2">
+                                              <input
+                                                type="checkbox"
+                                                checked={allSubChecked}
+                                                ref={(el) => {
+                                                  if (el) el.indeterminate = someSubChecked && !allSubChecked;
+                                                }}
+                                                onChange={() => {
+                                                  const index = roles.findIndex((r: any) => r.id === role.id);
+                                                  if (index === -1 || role.isOwnerRole) return;
+                                                  const rroles = Object.assign([] as typeof roles, roles);
+                                                  const allChecked = subcatPerms.every((perm: any) =>
+                                                    rroles[index].permissions.includes(perm)
+                                                  );
+                                                  if (allChecked) {
+                                                    rroles[index].permissions = rroles[index].permissions.filter(
+                                                      (perm: any) => !subcatPerms.includes(perm)
+                                                    );
+                                                  } else {
+                                                    subcatPerms.forEach((perm: any) => {
+                                                      if (!rroles[index].permissions.includes(perm)) {
+                                                        rroles[index].permissions.push(perm);
+                                                      }
+                                                    });
+                                                  }
+                                                  setRoles(rroles);
+                                                }}
+                                                disabled={role.isOwnerRole === true}
+                                                className="w-4 h-4 rounded text-primary border-gray-300 dark:border-zinc-600 focus:ring-primary/50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                              />
+                                              <button
+                                                onClick={() => toggleSubcategory(subcatKey)}
+                                                className="flex-1 flex items-center justify-between text-left focus:outline-none"
+                                              >
+                                                <span className="text-xs font-medium text-zinc-900 dark:text-white">
+                                                  {subcat} Sessions
+                                                </span>
+                                                <IconChevronDown
+                                                  className={clsx(
+                                                    "w-3.5 h-3.5 text-zinc-500 transition-transform",
+                                                    isSubExpanded ? "transform rotate-180" : ""
+                                                  )}
+                                                />
+                                              </button>
+                                            </div>
+                                            {isSubExpanded && (
+                                              <div className="px-3 py-2 space-y-1.5">
+                                                {Object.entries(subPerms).map(([label, value]: [string, any]) => (
+                                                  <label
+                                                    key={value}
+                                                    className="flex items-center space-x-2 pl-6"
+                                                  >
+                                                    <input
+                                                      type="checkbox"
+                                                      checked={role.permissions.includes(value)}
+                                                      onChange={() =>
+                                                        togglePermission(role.id, value)
+                                                      }
+                                                      disabled={role.isOwnerRole === true}
+                                                      className="w-4 h-4 rounded text-primary border-gray-300 dark:border-zinc-600 focus:ring-primary/50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                                    />
+                                                    <span className="text-xs text-zinc-700 dark:text-zinc-200">
+                                                      {label}
+                                                    </span>
+                                                  </label>
+                                                ))}
+                                              </div>
+                                            )}
+                                          </div>
+                                        );
+                                      })
+                                    ) : (
+                                      Object.entries(permsToRender as Record<string, string>).map(([label, value]) => (
+                                        <label
+                                          key={value}
+                                          className="flex items-center space-x-2 pl-6"
+                                        >
+                                          <input
+                                            type="checkbox"
+                                            checked={role.permissions.includes(value)}
+                                            onChange={() =>
+                                              togglePermission(role.id, value)
+                                            }
+                                            disabled={role.isOwnerRole === true}
+                                            className="w-4 h-4 rounded text-primary border-gray-300 dark:border-zinc-600 focus:ring-primary/50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                          />
+                                          <span className="text-sm text-zinc-700 dark:text-zinc-200">
+                                            {label}
+                                          </span>
+                                        </label>
+                                      ))
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                        {role.isOwnerRole === true && (
+                          <p className="mt-2 text-xs text-zinc-500 dark:text-zinc-400">
+                            Owner role permissions are automatically managed
+                          </p>
+                        )}
+                      </div>
+
+                      <div>
+                        <h4 className="text-sm font-medium text-zinc-900 dark:text-white mb-2">
+                          Group-synced roles
+                        </h4>
+                        <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-2">
+                          Each rank can only be assigned to one role
+                        </p>
+                        <div className="space-y-2">
+                          {grouproles
+                            .filter((groupRole) => groupRole.rank !== 0 && groupRole.name.toLowerCase() !== "guest")
+                            .filter((groupRole, index, allRoles) => {
+                              return (
+                                allRoles.findIndex((r) => {
+                                  if (typeof r.rank === "number" && typeof groupRole.rank === "number") {
+                                    return r.rank === groupRole.rank;
+                                  }
+                                  return r.name.toLowerCase() === groupRole.name.toLowerCase();
+                                }) === index
+                              );
+                            })
+                            .map((groupRole) => {
+                            const isAssignedElsewhere =
+                              aroledoesincludegrouprole(role.id, groupRole);
+                            const assignedRole = isAssignedElsewhere
+                              ? roles.find(
+                                  (r) =>
+                                    r.id !== role.id &&
+                                    r.groupRoles.includes(groupRole.id)
+                                )
+                              : null;
+                            return (
+                              <label
+                                key={groupRole.id}
+                                className="flex items-center justify-between space-x-2"
+                              >
+                                <div className="flex items-center space-x-2">
+                                  <input
+                                    type="checkbox"
+                                    checked={role.groupRoles.includes(
+                                      groupRole.id
+                                    )}
+                                    onChange={() =>
+                                      toggleGroupRole(role.id, groupRole)
+                                    }
+                                    disabled={
+                                      role.isOwnerRole === true ||
+                                      isAssignedElsewhere
+                                    }
+                                    className="w-4 h-4 rounded text-primary border-gray-300 dark:border-zinc-600 focus:ring-primary/50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                  />
+                                  <span
+                                    className={clsx(
+                                      "text-sm",
+                                      isAssignedElsewhere
+                                        ? "text-zinc-400 dark:text-zinc-500"
+                                        : "text-zinc-700 dark:text-zinc-200"
+                                    )}
+                                  >
+                                    {groupRole.name}
+                                  </span>
+                                </div>
+                              </label>
+                            );
+                          })}
+                        </div>
+                        {role.isOwnerRole === true && (
+                          <p className="mt-2 text-xs text-zinc-500 dark:text-zinc-400">
+                            Owner role group synchronization is disabled
+                          </p>
+                        )}
+                      </div>
+
+                      {!role.isOwnerRole && (
+                        <div className="flex gap-2">
+                          <button
+                            onClick={() => saveRole(role.id)}
+                            className="inline-flex items-center px-3 py-1.5 text-sm font-medium rounded-md text-white bg-primary hover:bg-primary/90 transition-colors"
+                          >
+                            Save Changes
+                          </button>
+                          <button
+                            onClick={() => deleteRole(role.id)}
+                            className="inline-flex items-center px-3 py-1.5 text-sm font-medium rounded-md text-white bg-red-500 hover:bg-red-600 transition-colors"
+                          >
+                            <IconTrash size={16} className="mr-1.5" />
+                            Delete Role
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  </Disclosure.Panel>
+                </Transition>
+              </>
+            )}
+          </Disclosure>
+        ))}
+      </div>
+      <Toaster position="bottom-center" />
+    </div>
+  );
+};
+
+export default RolesManager;

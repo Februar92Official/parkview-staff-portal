@@ -1,0 +1,41 @@
+// Next.js API route support: https://nextjs.org/docs/api-routes/introduction
+import type { NextApiRequest, NextApiResponse } from 'next'
+import { getConfig, setConfig } from '@/utils/configEngine'
+import { logAudit } from '@/utils/logs'
+import { withPermissionCheck } from '@/utils/permissionsManager'
+import { withSessionRoute } from '@/lib/withSession'
+
+type Data = {
+  success: boolean
+  error?: string
+  value?: any
+}
+
+export default withSessionRoute(handler);
+
+async function handler(
+  req: NextApiRequest,
+  res: NextApiResponse<Data>
+) {
+  const userId = (req as any).session?.userid;
+  if (!userId) {
+    return res.status(401).json({ success: false, error: 'Unauthorized' });
+  }
+
+  if (req.method === 'GET') {
+    return res.status(200).json({ success: true });
+  }
+
+  if (req.method === 'PATCH') {
+    return withPermissionCheck(async (req: NextApiRequest, res: NextApiResponse<Data>) => {
+      const workspaceId = parseInt(req.query.id as string);
+      const before = await getConfig('sessions', workspaceId);
+      const after = { enabled: req.body.enabled };
+      await setConfig('sessions', after, workspaceId);
+      try { await logAudit(workspaceId, (req as any).session?.userid || null, 'settings.general.sessions.update', 'sessions', { before, after }); } catch (e) {}
+      return res.status(200).json({ success: true });
+    }, 'manage_features')(req, res);
+  }
+
+  return res.status(405).json({ success: false, error: 'Method not allowed' });
+}

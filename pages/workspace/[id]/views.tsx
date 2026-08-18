@@ -1,0 +1,3099 @@
+import workspace from "@/layouts/workspace";
+import { pageWithLayout } from "@/layoutTypes";
+import { loginState } from "@/state";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
+import { Dialog, Popover, Transition } from "@headlessui/react";
+import { GetServerSidePropsContext, InferGetServerSidePropsType } from "next";
+import { getThumbnail } from "@/utils/userinfoEngine";
+import { useRecoilState } from "recoil";
+import { workspacestate } from "@/state";
+import Input from "@/components/input";
+import { v4 as uuidv4 } from "uuid";
+import prisma from "@/utils/database";
+import {
+  createColumnHelper,
+  flexRender,
+  getCoreRowModel,
+  getFilteredRowModel,
+  getSortedRowModel,
+  SortingState,
+  getPaginationRowModel,
+  useReactTable,
+} from "@tanstack/react-table";
+import { FormProvider, useForm } from "react-hook-form";
+import Button from "@/components/button";
+import {
+  inactivityNotice,
+  Session,
+  user,
+  userBook,
+  wallPost,
+} from "@prisma/client";
+import Checkbox from "@/components/checkbox";
+import toast, { Toaster } from "react-hot-toast";
+import axios from "axios";
+import { useRouter } from "next/router";
+import moment from "moment";
+import { withPermissionCheckSsr } from "@/utils/permissionsManager";
+import { getConfig } from "@/utils/configEngine";
+import {
+  IconArrowLeft,
+  IconFilter,
+  IconPlus,
+  IconSearch,
+  IconUsers,
+  IconX,
+  IconUserCheck,
+  IconAlertCircle,
+  IconShieldX,
+  IconBriefcase,
+  IconFile,
+  IconFolder,
+  IconBox,
+  IconId,
+  IconTools,
+  IconTag,
+  IconPin,
+  IconStar,
+  IconSparkles,
+  IconBell,
+  IconLock,
+  IconArrowUp,
+  IconArrowDown,
+  IconAlertTriangle,
+  IconCoffee,
+  IconSchool,
+  IconTarget,
+  IconCalendarWeekFilled,
+  IconSpeakerphone,
+  IconPencil,
+  IconChevronDown,
+  IconDeviceFloppy,
+  IconExternalLink,
+  IconLoader2,
+  IconLayoutList,
+  IconLayoutGrid,
+  IconCopy,
+  IconBeach,
+  IconMinus,
+  IconClock,
+  IconMessage,
+  IconUser,
+  IconDownload,
+} from "@tabler/icons-react";
+import { UserGroupIcon, UserMultiple02Icon } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
+import Tooltip from "@/components/tooltip";
+
+type User = {
+  info: {
+    userId: BigInt;
+    username: string | null;
+    picture: string | null;
+  };
+  book: userBook[];
+  wallPosts: wallPost[];
+  inactivityNotices: inactivityNotice[];
+  sessions: any[];
+  rankID: number;
+  rankName: string | null;
+  minutes: number;
+  idleMinutes: number;
+  hostedSessions: { length: number };
+  sessionsAttended: number;
+  allianceVisits: number;
+  messages: number;
+  registered: boolean;
+  quota: boolean;
+  quotaFailed: boolean;
+  quotaCompleted: number;
+  quotaTotal: number;
+  departments?: string[];
+  lastPeriodMinutes: number | null;
+  lastPeriodSessionsHosted: number | null;
+  lastPeriodSessionsAttended: number | null;
+};
+
+export const getServerSideProps = withPermissionCheckSsr(
+  async ({ params, req }: GetServerSidePropsContext) => {
+    const workspaceGroupId = parseInt(params?.id as string);
+    const currentUserId = req.session?.userid;
+    const currentUser = await prisma.user.findFirst({
+      where: { userid: BigInt(currentUserId) },
+      include: {
+        workspaceMemberships: {
+          where: { workspaceGroupId },
+        },
+        roles: {
+          where: { workspaceGroupId },
+        },
+      },
+    });
+
+    const membership = currentUser?.workspaceMemberships?.[0];
+    const isAdmin = membership?.isAdmin || false;
+    const userRole = currentUser?.roles?.[0];
+    const hasManageViewsPerm =
+      userRole?.permissions?.includes("edit_views") || false;
+    const hasCreateViewsPerm =
+      userRole?.permissions?.includes("create_views") || false;
+    const hasDeleteViewsPerm =
+      userRole?.permissions?.includes("delete_views") || false;
+    const hasUseSavedViewsPerm =
+      userRole?.permissions?.includes("use_views") || false;
+    const hasMassActionsPerm =
+      isAdmin ||
+      userRole?.permissions?.includes("use_mass_actions") ||
+      false;
+    const hasViewMemberProfiles =
+      isAdmin ||
+      userRole?.permissions?.includes("view_member_profiles") ||
+      false;
+    const hasExportPerm =
+      isAdmin ||
+      userRole?.permissions?.includes("export_views") ||
+      false;
+
+    const departments = await prisma.department.findMany({
+      where: { workspaceGroupId },
+      select: {
+        id: true,
+        name: true,
+        color: true,
+      },
+      orderBy: {
+        name: "asc",
+      },
+    });
+
+    return {
+      props: {
+        isAdmin: isAdmin,
+        hasManageViewsPerm: hasManageViewsPerm,
+        hasCreateViewsPerm: hasCreateViewsPerm,
+        hasDeleteViewsPerm: hasDeleteViewsPerm,
+        hasUseSavedViewsPerm: hasUseSavedViewsPerm,
+        hasMassActionsPerm: hasMassActionsPerm,
+        hasViewMemberProfiles: hasViewMemberProfiles,
+        hasExportPerm: hasExportPerm,
+        departments: JSON.parse(JSON.stringify(departments)),
+      },
+    };
+  },
+  "view_members",
+);
+
+const filters: {
+  [key: string]: string[];
+} = {
+  username: ["equal", "notEqual", "contains"],
+  minutes: ["equal", "greaterThan", "lessThan"],
+  idle: ["equal", "greaterThan", "lessThan"],
+  rank: ["equal", "notEqual", "greaterThan", "lessThan"],
+  sessions: ["equal", "notEqual", "greaterThan", "lessThan"],
+  hosted: ["equal", "notEqual", "greaterThan", "lessThan"],
+  warnings: ["equal", "notEqual", "greaterThan", "lessThan"],
+  messages: ["equal", "notEqual", "greaterThan", "lessThan"],
+  notices: ["equal", "greaterThan", "lessThan"],
+  registered: ["equal", "notEqual"],
+  quota: ["equal", "notEqual"],
+  quotaFailed: ["equal", "notEqual"],
+  department: ["equal", "notEqual"],
+};
+
+const filterNames: {
+  [key: string]: string;
+} = {
+  equal: "Equals",
+  notEqual: "Does not equal",
+  contains: "Contains",
+  greaterThan: "Greater than",
+  lessThan: "Less than",
+};
+
+type pageProps = {
+  isAdmin: boolean;
+  hasManageViewsPerm: boolean;
+  hasCreateViewsPerm: boolean;
+  hasDeleteViewsPerm: boolean;
+  hasUseSavedViewsPerm: boolean;
+  hasMassActionsPerm: boolean;
+  hasViewMemberProfiles: boolean;
+  hasExportPerm: boolean;
+  departments: Array<{ id: string; name: string; color: string | null }>;
+};
+const Views: pageWithLayout<pageProps> = ({
+  isAdmin,
+  hasManageViewsPerm,
+  hasCreateViewsPerm,
+  hasDeleteViewsPerm,
+  hasUseSavedViewsPerm,
+  hasMassActionsPerm,
+  hasViewMemberProfiles,
+  hasExportPerm,
+  departments,
+}) => {
+  const [login, setLogin] = useRecoilState(loginState);
+  const [workspace, setWorkspace] = useRecoilState(workspacestate);
+  const router = useRouter();
+  const [selectedViewId, setSelectedViewId] = useState<string | null>(null);
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [viewToDelete, setViewToDelete] = useState<string | null>(null);
+  const [sorting, setSorting] = useState<SortingState>([
+    { id: "rankName", desc: false },
+  ]);
+  const [rowSelection, setRowSelection] = useState({});
+  const [isOpen, setIsOpen] = useState(false);
+  const [message, setMessage] = useState("");
+  const [type, setType] = useState("");
+  const [minutes, setMinutes] = useState(0);
+  const [users, setUsers] = useState<User[]>([]);
+  const [ranks, setRanks] = useState<
+    { id: number; rank: number; name: string }[]
+  >([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState([]);
+  const [externalSearchResults, setExternalSearchResults] = useState<any[]>([]);
+  const [isSearchingExternal, setIsSearchingExternal] = useState(false);
+  const [colFilters, setColFilters] = useState<
+    {
+      id: string;
+      column: string;
+      filter: string;
+      value: string;
+    }[]
+  >([]);
+  const [filterOperator, setFilterOperator] = useState<'AND' | 'OR'>('AND');
+  const [savedViews, setSavedViews] = useState<any[]>([]);
+  const [localViews, setLocalViews] = useState<any[]>([]);
+  const [isSaveOpen, setIsSaveOpen] = useState(false);
+  const [saveName, setSaveName] = useState("");
+  const [saveColor, setSaveColor] = useState("");
+  const [saveIcon, setSaveIcon] = useState("");
+  const [saveType, setSaveType] = useState<"team" | "local">("local");
+  const [isEditMode, setIsEditMode] = useState(false);
+  const [originalViewConfig, setOriginalViewConfig] = useState<any>(null);
+  const [mobileViewsOpen, setMobileViewsOpen] = useState(false);
+  const [pagination, setPagination] = useState({ pageIndex: 0, pageSize: 12 });
+  const [totalUsers, setTotalUsers] = useState(0);
+  const [notifyDiscord, setNotifyDiscord] = useState(false);
+  const [bloxlinkEnabled, setBloxlinkEnabled] = useState(false);
+  const [discordEnabled, setDiscordEnabled] = useState(false);
+  const [kickFromDiscord, setKickFromDiscord] = useState(false);
+  const [banFromDiscord, setBanFromDiscord] = useState(false);
+  const [banDeleteDays, setBanDeleteDays] = useState(0);
+  const [viewLayout, setViewLayout] = useState<"list" | "card">("list");
+
+  useEffect(() => {
+    const savedLayout = localStorage.getItem("viewsLayout");
+    if (savedLayout === "card" || savedLayout === "list") {
+      setViewLayout(savedLayout);
+    }
+  }, []);
+
+  const handleLayoutChange = (layout: "list" | "card") => {
+    setViewLayout(layout);
+    localStorage.setItem("viewsLayout", layout);
+  };
+
+  const ICON_OPTIONS: { key: string; Icon: any; title?: string }[] = [
+    { key: "star", Icon: IconStar, title: "Star" },
+    { key: "sparkles", Icon: IconSparkles, title: "Sparkles" },
+    { key: "briefcase", Icon: IconBriefcase, title: "Briefcase" },
+    { key: "target", Icon: IconTarget, title: "Target" },
+    { key: "alert", Icon: IconAlertTriangle, title: "Warning" },
+    { key: "calendar", Icon: IconCalendarWeekFilled, title: "Calendar" },
+    { key: "speakerphone", Icon: IconSpeakerphone, title: "Speakerphone" },
+    { key: "file", Icon: IconFile, title: "File" },
+    { key: "folder", Icon: IconFolder, title: "Folder" },
+    { key: "box", Icon: IconBox, title: "Box" },
+    { key: "id", Icon: IconId, title: "ID" },
+    { key: "tools", Icon: IconTools, title: "Tools" },
+    { key: "tag", Icon: IconTag, title: "Tag" },
+    { key: "pin", Icon: IconPin, title: "Pin" },
+    { key: "bell", Icon: IconBell, title: "Bell" },
+    { key: "lock", Icon: IconLock, title: "Lock" },
+    { key: "coffee", Icon: IconCoffee, title: "Coffee" },
+    { key: "school", Icon: IconSchool, title: "School" },
+  ];
+
+  const renderIcon = (key: string, className = "w-5 h-5") => {
+    const found = ICON_OPTIONS.find((i) => i.key === key);
+    if (!found) return null;
+    const C = found.Icon;
+    return (
+      <C
+        className={className}
+        style={{ stroke: "#18181b", color: "#18181b" }}
+      />
+    );
+  };
+
+  const hasManageViews = () => {
+    return isAdmin || hasManageViewsPerm;
+  };
+
+  const hasCreateViews = () => {
+    return isAdmin || hasCreateViewsPerm;
+  };
+
+  const hasDeleteViews = () => {
+    return isAdmin || hasDeleteViewsPerm;
+  };
+
+  const hasUseSavedViews = () => {
+    return isAdmin || hasUseSavedViewsPerm;
+  };
+
+  const columnHelper = createColumnHelper<User>();
+
+  const updateUsers = async (query: string) => {};
+
+  const columns = [
+    {
+      id: "select",
+      header: ({ table }: any) => (
+        <Checkbox
+          {...{
+            checked: table.getIsAllRowsSelected(),
+            indeterminate: table.getIsSomeRowsSelected(),
+            onChange: table.getToggleAllRowsSelectedHandler(),
+          }}
+        />
+      ),
+      cell: ({ row }: any) => (
+        <Checkbox
+          {...{
+            checked: row.getIsSelected(),
+            indeterminate: row.getIsSomeSelected(),
+            onChange: row.getToggleSelectedHandler(),
+          }}
+        />
+      ),
+    },
+    columnHelper.accessor("info", {
+      header: () => <span className="inline-flex items-center gap-1.5"><IconUser className="w-3.5 h-3.5 text-zinc-400 dark:text-zinc-500" />User</span>,
+      cell: (row) => {
+        return (
+          <div
+            className={`flex flex-row ${hasViewMemberProfiles ? "cursor-pointer" : "cursor-default"}`}
+            onClick={(e) => {
+              if (hasViewMemberProfiles) {
+                const href = `/workspace/${router.query.id}/profile/${row.getValue().userId}`;
+                if (e.ctrlKey || e.metaKey || e.shiftKey) {
+                  window.open(href, '_blank');
+                } else {
+                  router.push(href);
+                }
+              }
+            }}
+          >
+            <Tooltip orientation="top" tooltipText={row.getValue().username || ""}>
+              <div
+                className={`w-10 h-10 rounded-full flex items-center justify-center flex-shrink-0 ${getRandomBg(
+                  row.getValue().userId.toString(),
+                )}`}
+              >
+                <img
+                  src={row.getValue().picture!}
+                  className="w-10 h-10 rounded-full object-cover border-2 border-white"
+                  style={{ background: "transparent" }}
+                />
+              </div>
+            </Tooltip>
+            <p
+              className="leading-5 my-auto px-2 font-semibold dark:text-white truncate"
+            >
+              {row.getValue().username}
+            </p>
+            {(() => {
+              const notices = row.row.original.inactivityNotices || [];
+              const now = new Date();
+              const approved = notices.filter(
+                (n: any) =>
+                  n.approved === true &&
+                  n.reviewed === true &&
+                  n.revoked === false,
+              );
+              const active = approved.find(
+                (n: any) =>
+                  n.endTime &&
+                  new Date(n.startTime) <= now &&
+                  new Date(n.endTime) >= now,
+              );
+              if (active) {
+                return (
+                  <div
+                    className="flex-shrink-0 my-auto"
+                  >
+                    <IconBeach className="w-4 h-4 text-amber-500" />
+                  </div>
+                );
+              }
+              const upcoming = approved.find(
+                (n: any) => new Date(n.startTime) > now,
+              );
+              if (upcoming) {
+                return (
+                  <div
+                    className="flex-shrink-0 my-auto"
+                  >
+                    <IconBeach className="w-4 h-4 text-emerald-500" />
+                  </div>
+                );
+              }
+              const past = approved.find(
+                (n: any) => n.endTime && new Date(n.endTime) < now,
+              );
+              if (past) {
+                return (
+                  <div
+                    className="flex-shrink-0 my-auto"
+                  >
+                    <IconBeach className="w-4 h-4 text-zinc-400" />
+                  </div>
+                );
+              }
+              return null;
+            })()}
+            <Tooltip orientation="top" tooltipText="Copy username">
+              <button
+                type="button"
+                className="ml-1 p-1 my-auto rounded hover:bg-zinc-200 dark:hover:bg-zinc-700 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 transition-colors flex-shrink-0 leading-none"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  const username = row.getValue().username;
+                  if (username) {
+                    navigator.clipboard.writeText(username);
+                    toast.success(`Copied to clipboard`);
+                  }
+                }}
+              >
+                <IconCopy className="w-3.5 h-3.5" />
+              </button>
+            </Tooltip>
+          </div>
+        );
+      },
+    }),
+    columnHelper.accessor("rankName", {
+      header: () => <span className="inline-flex items-center gap-1.5"><IconStar className="w-3.5 h-3.5 text-amber-400" />Rank</span>,
+      cell: (row) => {
+        return <p className="dark:text-white">{row.getValue() || "Guest"}</p>;
+      },
+      sortingFn: (rowA, rowB) => {
+        const rankA = rowA.original.rankID || 0;
+        const rankB = rowB.original.rankID || 0;
+        return rankA - rankB;
+      },
+    }),
+    columnHelper.accessor("departments", {
+      header: () => <span className="inline-flex items-center gap-1.5"><IconBriefcase className="w-3.5 h-3.5 text-indigo-400" />Department</span>,
+      cell: (row) => {
+        const userDepts = row.getValue();
+        if (!userDepts || userDepts.length === 0) {
+          return <p className="dark:text-white text-zinc-400">-</p>;
+        }
+        return (
+          <div className="flex flex-wrap gap-1">
+            {userDepts.slice(0, 2).map((dept: string, idx: number) => {
+              const deptInfo = departments.find((d) => d.name === dept);
+              const bgColor = deptInfo?.color || undefined;
+              return (
+                <span
+                  key={idx}
+                  className={`text-xs px-2 py-0.5 rounded-full whitespace-nowrap truncate max-w-[120px] ${
+                    bgColor
+                      ? "text-zinc-900 dark:text-white"
+                      : "bg-blue-100 dark:bg-blue-900 text-blue-800 dark:text-blue-200"
+                  }`}
+                  style={bgColor ? { backgroundColor: bgColor } : undefined}
+                  title={dept}
+                >
+                  {dept}
+                </span>
+              );
+            })}
+            {userDepts.length > 2 && (
+              <span className="text-xs text-zinc-500 dark:text-zinc-400">
+                +{userDepts.length - 2}
+              </span>
+            )}
+          </div>
+        );
+      },
+    }),
+    columnHelper.accessor("hostedSessions", {
+      header: () => <span className="inline-flex items-center gap-1.5"><IconCalendarWeekFilled className="w-3.5 h-3.5 text-emerald-400" />Hosted sessions</span>,
+      cell: (row) => {
+        const hosted = row.getValue() as any;
+        const len =
+          hosted && typeof hosted.length === "number" ? hosted.length : 0;
+        return <p className="dark:text-white">{len}</p>;
+      },
+    }),
+    columnHelper.accessor("sessionsAttended", {
+      header: () => <span className="inline-flex items-center gap-1.5"><IconSchool className="w-3.5 h-3.5 text-sky-400" />Sessions Attended</span>,
+      cell: (row) => {
+        return <p className="dark:text-white">{row.getValue()}</p>;
+      },
+    }),
+    columnHelper.accessor("lastPeriodSessionsHosted", {
+      header: () => <span className="inline-flex items-center gap-1.5"><IconCalendarWeekFilled className="w-3.5 h-3.5 text-slate-400" />Last Period Hosted</span>,
+      cell: (row) => {
+        const val = row.getValue();
+        return <p className="dark:text-white">{val !== null ? val : "-"}</p>;
+      },
+    }),
+    columnHelper.accessor("lastPeriodSessionsAttended", {
+      header: () => <span className="inline-flex items-center gap-1.5"><IconSchool className="w-3.5 h-3.5 text-slate-400" />Last Period Attended</span>,
+      cell: (row) => {
+        const val = row.getValue();
+        return <p className="dark:text-white">{val !== null ? val : "-"}</p>;
+      },
+    }),
+    columnHelper.accessor("allianceVisits", {
+      header: () => <span className="inline-flex items-center gap-1.5"><IconTarget className="w-3.5 h-3.5 text-rose-400" />Alliance Visits</span>,
+      cell: (row) => {
+        return <p className="dark:text-white">{row.getValue()}</p>;
+      },
+    }),
+    columnHelper.accessor("book", {
+      header: () => <span className="inline-flex items-center gap-1.5"><IconAlertTriangle className="w-3.5 h-3.5 text-amber-400" />Warnings</span>,
+      cell: (row) => {
+        const book = row.getValue() as any[];
+        const warnings = Array.isArray(book)
+          ? book.filter((b) => b.type === "warning" && !b.redacted).length
+          : 0;
+        return <p className="dark:text-white">{warnings}</p>;
+      },
+    }),
+    columnHelper.accessor("inactivityNotices", {
+      header: () => <span className="inline-flex items-center gap-1.5"><IconBeach className="w-3.5 h-3.5 text-orange-400" />Inactivity notices</span>,
+      cell: (row) => {
+        return <p className="dark:text-white">{row.getValue().length}</p>;
+      },
+    }),
+    columnHelper.accessor("minutes", {
+      header: () => <span className="inline-flex items-center gap-1.5"><IconClock className="w-3.5 h-3.5 text-sky-400" />Minutes</span>,
+      cell: (row) => {
+        return <p className="dark:text-white">{row.getValue()}</p>;
+      },
+    }),
+    columnHelper.accessor("lastPeriodMinutes", {
+      header: () => <span className="inline-flex items-center gap-1.5"><IconClock className="w-3.5 h-3.5 text-slate-400" />Last Period Activity</span>,
+      cell: (row) => {
+        const val = row.getValue();
+        return <p className="dark:text-white">{val !== null ? val : "-"}</p>;
+      },
+    }),
+    columnHelper.accessor("idleMinutes", {
+      header: () => <span className="inline-flex items-center gap-1.5"><IconCoffee className="w-3.5 h-3.5 text-yellow-500" />Idle minutes</span>,
+      cell: (row) => {
+        return <p className="dark:text-white">{row.getValue()}</p>;
+      },
+    }),
+    columnHelper.accessor("messages", {
+      header: () => <span className="inline-flex items-center gap-1.5"><IconMessage className="w-3.5 h-3.5 text-violet-400" />Messages</span>,
+      cell: (row) => {
+        return <p className="dark:text-white">{row.getValue()}</p>;
+      },
+    }),
+    columnHelper.accessor("registered", {
+      header: () => <span className="inline-flex items-center gap-1.5"><IconId className="w-3.5 h-3.5 text-green-400" />Registered</span>,
+      cell: (row) => {
+        return <p>{row.getValue() ? "✅" : "❌"}</p>;
+      },
+    }),
+    columnHelper.accessor("quota", {
+      header: () => <span className="inline-flex items-center gap-1.5"><IconSparkles className="w-3.5 h-3.5 text-emerald-400" />Quota Complete</span>,
+      cell: (row) => {
+        const user = row.row.original;
+        if (user.quotaTotal === 0) return <p>-</p>;
+        return (
+          <p>
+            {user.quotaCompleted}/{user.quotaTotal}
+          </p>
+        );
+      },
+    }),
+    columnHelper.accessor("quotaFailed", {
+      header: () => <span className="inline-flex items-center gap-1.5"><IconAlertCircle className="w-3.5 h-3.5 text-red-400" />Quota Failed</span>,
+      cell: (row) => {
+        const user = row.row.original;
+        if (user.quotaTotal === 0) return <p>-</p>;
+        const failed = user.quotaTotal - user.quotaCompleted;
+        return (
+          <p>
+            {failed}/{user.quotaTotal}
+          </p>
+        );
+      },
+    }),
+  ];
+
+  const [columnVisibility, setColumnVisibility] = useState({
+    info: true,
+    rankName: true,
+    departments: false,
+    book: true,
+    minutes: true,
+    lastPeriodMinutes: false,
+    idleMinutes: true,
+    select: true,
+    hostedSessions: false,
+    lastPeriodSessionsHosted: false,
+    sessionsAttended: false,
+    lastPeriodSessionsAttended: false,
+    allianceVisits: false,
+    inactivityNotices: false,
+    messages: false,
+    registered: false,
+    quota: false,
+    quotaFailed: false,
+  });
+
+  const table = useReactTable({
+    columns,
+    data: users,
+    state: {
+      sorting,
+      rowSelection,
+      // @ts-ignore
+      columnVisibility,
+      pagination,
+    },
+    // @ts-ignore
+    onColumnVisibilityChange: setColumnVisibility,
+    onRowSelectionChange: setRowSelection,
+    onSortingChange: setSorting,
+    onPaginationChange: setPagination,
+    getCoreRowModel: getCoreRowModel(),
+    getSortedRowModel: getSortedRowModel(),
+    manualPagination: true,
+    pageCount: Math.ceil(totalUsers / pagination.pageSize),
+  });
+
+  const newfilter = () => {
+    setColFilters([
+      ...colFilters,
+      { id: uuidv4(), column: "username", filter: "equal", value: "" },
+    ]);
+  };
+  const removeFilter = (id: string) => {
+    setColFilters(colFilters.filter((filter) => filter.id !== id));
+  };
+  const updateFilter = (
+    id: string,
+    column: string,
+    filter: string,
+    value: string,
+  ) => {
+    const OBJ = Object.assign([] as typeof colFilters, colFilters);
+    const index = OBJ.findIndex((filter) => filter.id === id);
+    OBJ[index] = { id, column, filter, value };
+    setColFilters(OBJ);
+  };
+
+  const loadSavedViews = async () => {
+    try {
+      const res = await axios.get(`/api/workspace/${router.query.id}/views`);
+      if (res.data) {
+        setSavedViews(res.data.views || []);
+        setLocalViews(res.data.localViews || []);
+      }
+    } catch (e) {
+      console.error("Failed to load views", e);
+    }
+  };
+
+  useEffect(() => {
+    if (router.query.id) loadSavedViews();
+  }, [router.query.id]);
+
+  const allViews = [...savedViews, ...localViews];
+
+  useEffect(() => {
+    if (!router.query.id) return;
+    const checkBloxlinkStatus = async () => {
+      try {
+        const response = await axios.get(
+          `/api/workspace/${router.query.id}/settings/bloxlink/status`,
+        );
+        if (response.data.success && response.data.integration) {
+          setBloxlinkEnabled(response.data.integration.isActive);
+        }
+      } catch (error) {
+        setBloxlinkEnabled(false);
+      }
+    };
+    const checkDiscordStatus = async () => {
+      try {
+        const response = await axios.get(
+          `/api/workspace/${router.query.id}/settings/discord/status`,
+        );
+        if (response.data.success && response.data.integration?.isActive) {
+          setDiscordEnabled(true);
+        }
+      } catch (error) {}
+    };
+    checkBloxlinkStatus();
+    checkDiscordStatus();
+  }, [router.query.id]);
+
+  useEffect(() => {
+    const viewId = router.query.view as string;
+    if (viewId && allViews.length > 0) {
+      const view = allViews.find((v) => v.id === viewId);
+      if (view) {
+        setSelectedViewId(viewId);
+        applySavedView(view);
+      }
+    } else if (!viewId && allViews.length > 0) {
+      resetToDefault();
+    }
+  }, [router.query.view, savedViews, localViews]);
+
+  useEffect(() => {
+    if (router.query.newView) {
+      const typeHint =
+        router.query.newView === "local" ? "local" :
+        router.query.newView === "team" ? "team" : undefined;
+      openSaveDialog(typeHint);
+      router.replace(`/workspace/${router.query.id}/views`, undefined, {
+        shallow: true,
+      });
+    }
+  }, [router.query.newView]);
+
+  useEffect(() => {
+    const page = parseInt(router.query.page as string);
+    if (!isNaN(page) && page !== pagination.pageIndex) {
+      setPagination((prev) => ({ ...prev, pageIndex: page }));
+    }
+  }, [router.query.page]);
+  useEffect(() => {
+    setPagination((prev) => ({ ...prev, pageIndex: 0 }));
+  }, [colFilters, filterOperator]);
+
+  useEffect(() => {
+    const fetchStaffData = async () => {
+      if (!router.query.id) return;
+
+      setIsLoading(true);
+      try {
+        const visibleColumnKeys = Object.entries(columnVisibility)
+          .filter(([_, visible]) => visible)
+          .map(([key]) => key);
+
+        const res = await axios.get(
+          `/api/workspace/${router.query.id}/views/staff`,
+          {
+            params: {
+              page: pagination.pageIndex,
+              pageSize: pagination.pageSize,
+              filters: JSON.stringify(colFilters),
+              columns: JSON.stringify(visibleColumnKeys),
+              filterOperator,
+            },
+          },
+        );
+
+        if (res.data) {
+          setUsers(res.data.users || []);
+          setRanks(res.data.ranks || []);
+          setTotalUsers(res.data.pagination?.totalUsers || 0);
+        }
+      } catch (error) {
+        console.error("Failed to fetch staff data:", error);
+        toast.error("Failed to load staff data");
+      } finally {
+        setIsLoading(false);
+      }
+    };
+
+    fetchStaffData();
+  }, [
+    router.query.id,
+    pagination.pageIndex,
+    pagination.pageSize,
+    colFilters,
+    columnVisibility,
+    filterOperator,
+  ]);
+
+  const applySavedView = (view: any) => {
+    if (!view) return;
+    const filtersField = view.filters;
+    if (Array.isArray(filtersField)) {
+      setColFilters(filtersField || []);
+      setFilterOperator('AND');
+    } else if (filtersField && typeof filtersField === "object") {
+      setColFilters(filtersField.filters || []);
+      setFilterOperator(filtersField.filterOperator === 'OR' ? 'OR' : 'AND');
+      if (filtersField.sorting && Array.isArray(filtersField.sorting)) {
+        try {
+          setSorting(filtersField.sorting);
+        } catch (e) {
+          console.error("Failed to apply saved sorting", e);
+        }
+      } else {
+        setSorting([]);
+      }
+    } else {
+      setColFilters([]);
+      setFilterOperator('AND');
+    }
+
+    setColumnVisibility(view.columnVisibility || {});
+    setOriginalViewConfig({
+      filters: JSON.parse(JSON.stringify(filtersField)),
+      columnVisibility: JSON.parse(JSON.stringify(view.columnVisibility || {})),
+      sorting: JSON.parse(JSON.stringify(filtersField?.sorting || [])),
+    });
+    setIsEditMode(false);
+  };
+
+  const resetToDefault = () => {
+    setSelectedViewId(null);
+    setColFilters([]);
+    setColumnVisibility({
+      info: true,
+      rankName: true,
+      departments: false,
+      book: true,
+      minutes: true,
+      lastPeriodMinutes: false,
+      idleMinutes: true,
+      select: true,
+      hostedSessions: false,
+      lastPeriodSessionsHosted: false,
+      sessionsAttended: false,
+      lastPeriodSessionsAttended: false,
+      allianceVisits: false,
+      inactivityNotices: false,
+      messages: false,
+      registered: false,
+      quota: false,
+      quotaFailed: false,
+    });
+    setSorting([]);
+    setFilterOperator('AND');
+    setIsEditMode(false);
+    setOriginalViewConfig(null);
+  };
+
+  const openSaveDialog = (typeHint?: "team" | "local") => {
+    setSaveName("");
+    setSaveColor("");
+    setSaveIcon("");
+    setSaveType(typeHint ?? (hasCreateViews() ? "team" : "local"));
+    setIsSaveOpen(true);
+  };
+
+  const saveCurrentView = async () => {
+    try {
+      const filtersPayload: any = {
+        filters: colFilters,
+        filterOperator,
+      };
+
+      if (sorting && Array.isArray(sorting) && sorting.length > 0) {
+        filtersPayload.sorting = sorting;
+      }
+
+      const isLocal = saveType === "local";
+      const payload = {
+        name: saveName || `View ${new Date().toISOString()}`,
+        color: saveColor || null,
+        icon: saveIcon || null,
+        filters: filtersPayload,
+        columnVisibility,
+        isLocal,
+      };
+      const res = await axios.post(
+        `/api/workspace/${router.query.id}/views`,
+        payload,
+      );
+      if (res.data && res.data.view) {
+        const newView = res.data.view;
+        if (isLocal) {
+          setLocalViews((prev) => [...prev, newView]);
+        } else {
+          setSavedViews((prev) => [...prev, newView]);
+        }
+        window.dispatchEvent(new CustomEvent("savedViewsChanged"));
+        router.push(
+          { pathname: router.pathname, query: { ...router.query, view: newView.id, page: 0 } },
+          undefined,
+          { shallow: true },
+        );
+      }
+      setIsSaveOpen(false);
+      toast.success(isLocal ? "Local view created!" : "Team view created!");
+    } catch (e) {
+      toast.error("Failed to create view.");
+    }
+  };
+
+  const deleteSavedView = async (id: string) => {
+    try {
+      await axios.delete(`/api/workspace/${router.query.id}/views/${id}`);
+      setSavedViews((prev) => prev.filter((v) => v.id !== id));
+      setLocalViews((prev) => prev.filter((v) => v.id !== id));
+      toast.success("View deleted!");
+    } catch (e) {
+      toast.error("Failed to delete view.");
+    }
+  };
+
+  const confirmDeleteSavedView = async () => {
+    if (!viewToDelete) return;
+    try {
+      await deleteSavedView(viewToDelete);
+      if (selectedViewId === viewToDelete) {
+        setSelectedViewId(null);
+        setColFilters([]);
+        setColumnVisibility({
+          info: true,
+          rankName: true,
+          departments: false,
+          book: true,
+          minutes: true,
+          lastPeriodMinutes: false,
+          idleMinutes: true,
+          select: true,
+          hostedSessions: false,
+          lastPeriodSessionsHosted: false,
+          sessionsAttended: false,
+          lastPeriodSessionsAttended: false,
+          allianceVisits: false,
+          inactivityNotices: false,
+          messages: false,
+          registered: false,
+          quota: false,
+          quotaFailed: false,
+        });
+        setSorting([]);
+      }
+    } catch (e) {
+      console.error(e);
+    }
+    setShowDeleteModal(false);
+    setViewToDelete(null);
+  };
+
+  const hasUnsavedChanges = () => {
+    if (!isEditMode || !originalViewConfig) return false;
+    const currentFilters: any = {
+      filters: colFilters,
+      filterOperator,
+    };
+    if (sorting && sorting.length > 0) {
+      currentFilters.sorting = sorting;
+    }
+
+    const storedFilters = originalViewConfig.filters;
+    const normalisedStored: any = {
+      filters: storedFilters?.filters || [],
+      filterOperator: storedFilters?.filterOperator || 'AND',
+    };
+    if (storedFilters?.sorting && storedFilters.sorting.length > 0) {
+      normalisedStored.sorting = storedFilters.sorting;
+    }
+
+    const filtersChanged =
+      JSON.stringify(currentFilters) !== JSON.stringify(normalisedStored);
+    const columnsChanged =
+      JSON.stringify(columnVisibility) !==
+      JSON.stringify(originalViewConfig.columnVisibility);
+
+    return filtersChanged || columnsChanged;
+  };
+
+  const handleEditOrSaveView = async () => {
+    if (!selectedViewId) return;
+
+    if (isEditMode && hasUnsavedChanges()) {
+      try {
+        const filtersPayload: any = {
+          filters: colFilters,
+          filterOperator,
+        };
+
+        if (sorting && Array.isArray(sorting) && sorting.length > 0) {
+          filtersPayload.sorting = sorting;
+        }
+
+        const payload = {
+          filters: filtersPayload,
+          columnVisibility,
+        };
+
+        await axios.patch(
+          `/api/workspace/${router.query.id}/views/${selectedViewId}`,
+          payload,
+        );
+
+        setSavedViews((prev) =>
+          prev.map((v) =>
+            v.id === selectedViewId
+              ? { ...v, filters: filtersPayload, columnVisibility }
+              : v,
+          ),
+        );
+        setLocalViews((prev) =>
+          prev.map((v) =>
+            v.id === selectedViewId
+              ? { ...v, filters: filtersPayload, columnVisibility }
+              : v,
+          ),
+        );
+
+        setOriginalViewConfig({
+          filters: JSON.parse(JSON.stringify(filtersPayload)),
+          columnVisibility: JSON.parse(JSON.stringify(columnVisibility)),
+          sorting: JSON.parse(JSON.stringify(sorting)),
+        });
+
+        setIsEditMode(false);
+        toast.success("View updated!");
+      } catch (e) {
+        toast.error("Failed to update view.");
+      }
+    } else if (isEditMode) {
+      const view = [...savedViews, ...localViews].find((v) => v.id === selectedViewId);
+      if (view) applySavedView(view);
+    } else {
+      setIsEditMode(true);
+    }
+  };
+
+  useEffect(() => {}, [colFilters]);
+
+  const massAction = () => {
+    const selected = table.getSelectedRowModel().flatRows;
+    const promises: any[] = [];
+    for (const select of selected) {
+      const data = select.original;
+
+      if (type == "add") {
+        promises.push(
+          axios.post(`/api/workspace/${router.query.id}/activity/add`, {
+            userId: data.info.userId,
+            minutes,
+          }),
+        );
+      } else if (type === "award_minutes" || type === "remove_minutes") {
+        promises.push(
+          axios.post(`/api/workspace/${router.query.id}/activity/adjustment`, {
+            userId: Number(data.info.userId),
+            minutes,
+            action: type === "award_minutes" ? "award" : "remove",
+          }),
+        );
+      } else {
+        const apiType = type === "fire" ? "termination" : type;
+        promises.push(
+          axios.post(
+            `/api/workspace/${router.query.id}/userbook/${data.info.userId}/new`,
+            {
+              notes: message,
+              type: apiType,
+              notifyDiscord:
+                notifyDiscord &&
+                bloxlinkEnabled &&
+                discordEnabled &&
+                (apiType === "warning" ||
+                  apiType === "promotion" ||
+                  apiType === "demotion" ||
+                  apiType === "termination" ||
+                  apiType === "resignation"),
+              ...(apiType === "termination" &&
+                notifyDiscord &&
+                bloxlinkEnabled && {
+                  terminationAction: banFromDiscord
+                    ? "ban"
+                    : kickFromDiscord
+                      ? "kick"
+                      : "none",
+                  ...(banFromDiscord && { banDeleteDays }),
+                }),
+            },
+          ),
+        );
+      }
+    }
+
+    toast.promise(Promise.all(promises), {
+      loading: "Actions in progress...",
+      success: () => {
+        setIsOpen(false);
+        return "Actions applied!";
+      },
+      error: "Could not perform actions.",
+    });
+
+    setIsOpen(false);
+    setMessage("");
+    setType("");
+    setNotifyDiscord(false);
+    setKickFromDiscord(false);
+    setBanFromDiscord(false);
+    setBanDeleteDays(0);
+  };
+
+  const [searchTimeout, setSearchTimeout] = useState<NodeJS.Timeout | null>(
+    null,
+  );
+
+  const updateSearchQuery = (query: any) => {
+    setSearchQuery(query);
+    if (searchTimeout) {
+      clearTimeout(searchTimeout);
+    }
+
+    if (query.trim() === "") {
+      setSearchOpen(false);
+      setColFilters([]);
+      setSearchResults([]);
+      return;
+    }
+    const timeout = setTimeout(async () => {
+      try {
+        setSearchOpen(true);
+        const userRequest = await axios.get(
+          `/api/workspace/${router.query.id}/staff/search/${query.trim()}`,
+        );
+        const userList = userRequest.data.users;
+        setSearchResults(userList);
+      } catch (error: any) {
+        if (error.response?.status === 429) {
+          toast.error("Please wait before searching again");
+        }
+        setSearchResults([]);
+      }
+    }, 2000);
+
+    setSearchTimeout(timeout);
+  };
+
+  const updateSearchFilter = async (username: string) => {
+    setSearchQuery(username);
+    setSearchOpen(false);
+    setExternalSearchResults([]);
+    setColFilters([
+      { id: uuidv4(), column: "username", filter: "equal", value: username },
+    ]);
+  };
+
+  const searchExternally = async () => {
+    if (!searchQuery.trim()) return;
+
+    setIsSearchingExternal(true);
+    try {
+      const response = await axios.post("/api/roblox/id", {
+        keyword: searchQuery.trim(),
+      });
+
+      if (
+        response.data &&
+        response.data.data &&
+        response.data.data.length > 0
+      ) {
+        const users = response.data.data.map((user: any) => ({
+          userId: user.id,
+          username: user.name,
+          displayName: user.displayName,
+          thumbnail: `/api/workspace/${router.query.id}/avatar/${user.id}`,
+        }));
+        setExternalSearchResults(users);
+      } else {
+        setExternalSearchResults([]);
+        toast.error("No Roblox users found with that username");
+      }
+    } catch (error) {
+      console.error("External search failed:", error);
+      toast.error("Failed to search Roblox");
+      setExternalSearchResults([]);
+    } finally {
+      setIsSearchingExternal(false);
+    }
+  };
+
+  const openExternalProfile = (userId: number) => {
+    setSearchOpen(false);
+    setExternalSearchResults([]);
+    router.push(`/workspace/${router.query.id}/profile/${userId}`);
+  };
+
+  const exportData = (format: "csv" | "xls") => {
+    const visibleCols = Object.entries(columnVisibility)
+      .filter(([key, visible]) => visible && key !== "select")
+      .map(([key]) => key);
+
+    const headers = visibleCols.map((col) => {
+      if (col === "info") return "Username";
+      return getSelectionName(col) || col;
+    });
+
+    const rows = users.map((user) =>
+      visibleCols.map((col) => {
+        switch (col) {
+          case "info": return user.info.username || "";
+          case "rankName":
+          case "rankID": return user.rankName || "Guest";
+          case "departments": return (user.departments || []).join(", ");
+          case "book": {
+            const w = Array.isArray(user.book)
+              ? user.book.filter((b: any) => b.type === "warning" && !b.redacted).length
+              : 0;
+            return w;
+          }
+          case "minutes": return user.minutes;
+          case "lastPeriodMinutes": return user.lastPeriodMinutes ?? "";
+          case "idleMinutes": return user.idleMinutes;
+          case "hostedSessions": {
+            const h = user.hostedSessions as any;
+            return h && typeof h.length === "number" ? h.length : 0;
+          }
+          case "sessionsAttended": return user.sessionsAttended;
+          case "lastPeriodSessionsHosted": return user.lastPeriodSessionsHosted ?? "";
+          case "lastPeriodSessionsAttended": return user.lastPeriodSessionsAttended ?? "";
+          case "allianceVisits": return user.allianceVisits;
+          case "inactivityNotices": return user.inactivityNotices.length;
+          case "messages": return user.messages;
+          case "registered": return user.registered ? "Yes" : "No";
+          case "quota": return user.quotaTotal === 0 ? "-" : `${user.quotaCompleted}/${user.quotaTotal}`;
+          case "quotaFailed": return user.quotaTotal === 0 ? "-" : `${user.quotaTotal - user.quotaCompleted}/${user.quotaTotal}`;
+          default: return "";
+        }
+      })
+    );
+
+    const dateStr = new Date().toISOString().split("T")[0];
+
+    if (format === "csv") {
+      const escape = (val: any) => {
+        const s = String(val ?? "");
+        if (s.includes(",") || s.includes('"') || s.includes("\n")) {
+          return `"${s.replace(/"/g, '""')}"`;
+        }
+        return s;
+      };
+      const csv = [headers, ...rows].map((r) => r.map(escape).join(",")).join("\n");
+      const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `staff-export-${dateStr}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } else {
+      const tableHtml = `<table><thead><tr>${headers.map((h) => `<th>${h}</th>`).join("")}</tr></thead><tbody>${rows.map((r) => `<tr>${r.map((c) => `<td>${c}</td>`).join("")}</tr>`).join("")}</tbody></table>`;
+      const xls = `<html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:x='urn:schemas-microsoft-com:office:excel' xmlns='http://www.w3.org/TR/REC-html40'><head><!--[if gte mso 9]><xml><x:ExcelWorkbook><x:ExcelWorksheets><x:ExcelWorksheet><x:Name>Staff Export</x:Name><x:WorksheetOptions><x:DisplayGridlines/></x:WorksheetOptions></x:ExcelWorksheet></x:ExcelWorksheets></x:ExcelWorkbook></xml><![endif]--><meta charset='utf-8'/></head><body>${tableHtml}</body></html>`;
+      const blob = new Blob([xls], { type: "application/vnd.ms-excel;charset=utf-8;" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `staff-export-${dateStr}.xls`;
+      a.click();
+      URL.revokeObjectURL(url);
+    }
+  };
+
+  const getSelectionName = (columnId: string) => {
+    if (columnId == "sessionsAttended") {
+      return "Sessions Attended";
+    } else if (columnId == "hostedSessions") {
+      return "Hosted Sessions";
+    } else if (columnId == "allianceVisits") {
+      return "Alliance Visits";
+    } else if (columnId == "book") {
+      return "Warnings";
+    } else if (columnId == "wallPosts") {
+      return "Wall Posts";
+    } else if (columnId == "rankName" || columnId == "rankID") {
+      return "Rank";
+    } else if (columnId == "departments") {
+      return "Department";
+    } else if (columnId == "inactivityNotices") {
+      return "Inactivity notices";
+    } else if (columnId == "minutes") {
+      return "Minutes";
+    } else if (columnId == "lastPeriodMinutes") {
+      return "Last Period Activity";
+    } else if (columnId == "lastPeriodSessionsHosted") {
+      return "Last Period Hosted";
+    } else if (columnId == "lastPeriodSessionsAttended") {
+      return "Last Period Attended";
+    } else if (columnId == "idleMinutes") {
+      return "Idle minutes";
+    } else if (columnId == "messages") {
+      return "Messages";
+    } else if (columnId == "registered") {
+      return "Registered";
+    } else if (columnId == "quota") {
+      return "Quota Complete";
+    } else if (columnId == "quotaFailed") {
+      return "Quota Failed";
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-zinc-50 dark:bg-zinc-900">
+      <Toaster position="bottom-center" />
+      <div className="pagePadding">
+        {/* Header */}
+        <div className="mb-6">
+          <h1 className="text-2xl font-medium text-zinc-900 dark:text-white">
+            Staff Management
+          </h1>
+          <p className="text-sm text-zinc-500 dark:text-zinc-400 mt-1">
+            View and manage your staff members
+          </p>
+        </div>
+
+        {hasUseSavedViews() &&
+          (savedViews.length > 0 ||
+            localViews.length > 0 ||
+            hasCreateViews()) && (
+            <div className="md:hidden mb-4 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">
+                  Views
+                </span>
+                {hasCreateViews() && (
+                  <button
+                    onClick={() => openSaveDialog()}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium bg-zinc-100 dark:bg-zinc-700 text-zinc-700 dark:text-zinc-200 hover:bg-zinc-200 dark:hover:bg-zinc-600 transition-all"
+                  >
+                    <IconPlus className="w-3 h-3" />
+                    New
+                  </button>
+                )}
+              </div>
+
+              {savedViews.length > 0 && (
+                <div>
+                  <div className="flex items-center gap-1 mb-1">
+                    <HugeiconsIcon
+                      icon={UserGroupIcon}
+                      className="w-3 h-3 text-zinc-400 dark:text-zinc-500"
+                    />
+                    <span className="text-[10px] font-semibold text-zinc-400 dark:text-zinc-500 uppercase tracking-wider">
+                      Team
+                    </span>
+                  </div>
+                  <div className="flex gap-1.5 overflow-x-auto pb-1 scrollbar-none">
+                    {savedViews.map((v) => (
+                      <button
+                        key={v.id}
+                        onClick={() => {
+                          if (selectedViewId === v.id) {
+                            const { view: _v, page: _p, ...rest } = router.query;
+                            router.push({ pathname: router.pathname, query: rest }, undefined, { shallow: true });
+                          } else {
+                            setSelectedViewId(v.id);
+                            applySavedView(v);
+                            router.push({ pathname: router.pathname, query: { ...router.query, view: v.id, page: 0 } }, undefined, { shallow: true });
+                          }
+                        }}
+                        className={`flex-shrink-0 inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-all ${
+                          selectedViewId === v.id
+                            ? "border-primary text-primary bg-primary/[8%] dark:bg-primary/15"
+                            : "border-zinc-200 dark:border-zinc-700 text-zinc-600 dark:text-zinc-400 bg-white dark:bg-zinc-800/50"
+                        }`}
+                      >
+                        <span
+                          className="w-3.5 h-3.5 rounded-sm flex items-center justify-center flex-shrink-0"
+                          style={{ background: v.color || "#e5e7eb" }}
+                        >
+                          {v.icon ? (
+                            renderIcon(v.icon, "w-2.5 h-2.5 !text-zinc-900")
+                          ) : (
+                            <span className="text-[8px] font-bold text-zinc-900">
+                              {(v.name || "").charAt(0).toUpperCase()}
+                            </span>
+                          )}
+                        </span>
+                        {v.name}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {localViews.length > 0 && (
+                <div>
+                  <div className="flex items-center gap-1 mb-1">
+                    <HugeiconsIcon
+                      icon={UserMultiple02Icon}
+                      className="w-3 h-3 text-zinc-400 dark:text-zinc-500"
+                    />
+                    <span className="text-[10px] font-semibold text-zinc-400 dark:text-zinc-500 uppercase tracking-wider">
+                      Local
+                    </span>
+                  </div>
+                  <div className="flex gap-1.5 overflow-x-auto pb-1 scrollbar-none">
+                    {localViews.map((v) => (
+                      <button
+                        key={v.id}
+                        onClick={() => {
+                          if (selectedViewId === v.id) {
+                            const { view: _v, page: _p, ...rest } = router.query;
+                            router.push({ pathname: router.pathname, query: rest }, undefined, { shallow: true });
+                          } else {
+                            setSelectedViewId(v.id);
+                            applySavedView(v);
+                            router.push({ pathname: router.pathname, query: { ...router.query, view: v.id, page: 0 } }, undefined, { shallow: true });
+                          }
+                        }}
+                        className={`flex-shrink-0 inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-all ${
+                          selectedViewId === v.id
+                            ? "border-primary text-primary bg-primary/[8%] dark:bg-primary/15"
+                            : "border-zinc-200 dark:border-zinc-700 text-zinc-600 dark:text-zinc-400 bg-white dark:bg-zinc-800/50"
+                        }`}
+                      >
+                        <span
+                          className="w-3.5 h-3.5 rounded-sm flex items-center justify-center flex-shrink-0"
+                          style={{ background: v.color || "#e5e7eb" }}
+                        >
+                          {v.icon ? (
+                            renderIcon(v.icon, "w-2.5 h-2.5 !text-zinc-900")
+                          ) : (
+                            <span className="text-[8px] font-bold text-zinc-900">
+                              {(v.name || "").charAt(0).toUpperCase()}
+                            </span>
+                          )}
+                        </span>
+                        {v.name}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {savedViews.length === 0 && localViews.length === 0 && (
+                <p className="text-xs text-zinc-400 dark:text-zinc-500">
+                  No views yet. Create one to get started.
+                </p>
+              )}
+            </div>
+          )}
+
+        <div className="flex gap-6">
+          {hasUseSavedViews() && (
+            <aside className="w-64 hidden">
+              <div className="sticky top-8">
+                <div className="bg-white dark:bg-zinc-800/40 border border-zinc-200 dark:border-zinc-700 rounded-lg p-3 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <h4 className="text-sm font-semibold text-zinc-900 dark:text-white">
+                      Team Views
+                    </h4>
+                    {hasCreateViews() && (
+                      <button
+                        onClick={() => openSaveDialog()}
+                        className="p-1.5 rounded-md text-zinc-700 dark:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-700 transition"
+                      >
+                        <IconPlus className="w-4 h-4" />
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="space-y-2">
+                    {savedViews.length === 0 && (
+                      <p className="text-sm text-zinc-500 dark:text-zinc-400">
+                        No team views
+                      </p>
+                    )}
+                    {savedViews.map((v) => (
+                      <div
+                        key={v.id}
+                        className={`flex items-center justify-between gap-2 px-3 py-2 rounded-md ${
+                          selectedViewId === v.id
+                            ? "bg-zinc-50 dark:bg-zinc-800/40 border-l-4 border-primary"
+                            : "hover:bg-zinc-50 dark:hover:bg-zinc-700/40"
+                        }`}
+                        style={{ minWidth: 0 }}
+                      >
+                        <button
+                          onClick={() => {
+                            if (selectedViewId === v.id) resetToDefault();
+                            else {
+                              setSelectedViewId(v.id);
+                              applySavedView(v);
+                            }
+                          }}
+                          className="flex items-center gap-3 text-left w-full"
+                        >
+                          <span
+                            className="w-8 h-8 rounded-md flex items-center justify-center flex-shrink-0"
+                            style={{ background: v.color || "#e5e7eb" }}
+                          >
+                            {v.icon ? (
+                              renderIcon(v.icon, "w-4 h-4 !text-zinc-900")
+                            ) : (
+                              <span className="text-sm font-medium text-zinc-900">
+                                {(v.name || "").charAt(0).toUpperCase()}
+                              </span>
+                            )}
+                          </span>
+
+                          <span className="text-sm font-medium truncate text-zinc-900 dark:text-white">
+                            {v.name}
+                          </span>
+                        </button>
+
+                        <div className="flex items-center gap-1">
+                          {hasDeleteViews() && (
+                            <Tooltip orientation="top" tooltipText="Delete view">
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setViewToDelete(v.id);
+                                  setShowDeleteModal(true);
+                                }}
+                                className="p-1.5 rounded-md text-zinc-700 dark:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-700 transition"
+                              >
+                                <IconX className="w-4 h-4" />
+                              </button>
+                            </Tooltip>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </aside>
+          )}
+
+          <div className="flex-1">
+            <div className="bg-white dark:bg-zinc-800/50 backdrop-blur-sm border border-zinc-200 dark:border-zinc-700/50 rounded-lg p-4 mb-6 relative z-10 overflow-visible">
+              <div className="flex flex-col md:flex-row gap-3 relative z-20">
+                <div className="flex gap-2">
+                  <Popover className="relative z-20">
+                    {({ open }) => (
+                      <>
+                        <Popover.Button
+                          className={`inline-flex items-center gap-2 px-3 py-2 text-sm font-medium rounded-lg border transition-all ${
+                            open
+                              ? "bg-zinc-100 dark:bg-zinc-700 border-zinc-300 dark:border-zinc-600 text-zinc-900 dark:text-white ring-2 ring-primary/50"
+                              : "bg-zinc-50 dark:bg-zinc-700/50 border-zinc-200 dark:border-zinc-600 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700 hover:text-zinc-900 dark:hover:text-white"
+                          }`}
+                        >
+                          <IconFilter className="w-4 h-4" />
+                          <span>Filters</span>
+                        </Popover.Button>
+
+                        <Transition
+                          as={Fragment}
+                          enter="transition ease-out duration-200"
+                          enterFrom="opacity-0 translate-y-1"
+                          enterTo="opacity-100 translate-y-0"
+                          leave="transition ease-in duration-150"
+                          leaveFrom="opacity-100 translate-y-0"
+                          leaveTo="opacity-0 translate-y-1"
+                        >
+                          <Popover.Panel className="absolute left-0 z-50 mt-2 w-72 origin-top-left rounded-lg bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 shadow-2xl p-4 top-full">
+                            <div className="space-y-3">
+                              <button
+                                onClick={newfilter}
+                                className="w-full inline-flex items-center justify-center gap-2 px-3 py-2 text-sm font-medium rounded-lg text-white bg-primary hover:bg-primary/90 transition-all"
+                              >
+                                <IconPlus className="w-4 h-4" />
+                                Add Filter
+                              </button>
+
+                              {colFilters.map((filter, index) => (
+                                <Fragment key={filter.id}>
+                                  <div
+                                    className="p-3 border border-zinc-200 dark:border-zinc-700 rounded-lg bg-zinc-50 dark:bg-zinc-900/50"
+                                  >
+                                    <Filter
+                                      ranks={ranks}
+                                      departments={departments}
+                                      updateFilter={(col, op, value) =>
+                                        updateFilter(filter.id, col, op, value)
+                                      }
+                                      deleteFilter={() => removeFilter(filter.id)}
+                                      data={filter}
+                                    />
+                                  </div>
+                                  {index < colFilters.length - 1 && (
+                                    <div className="flex justify-center">
+                                      <button
+                                        onClick={() => setFilterOperator(op => op === 'AND' ? 'OR' : 'AND')}
+                                        className="px-2.5 py-0.5 text-[11px] font-bold rounded-full bg-primary/10 border border-primary/30 text-primary hover:bg-primary/20 transition-colors"
+                                      >
+                                        {filterOperator}
+                                      </button>
+                                    </div>
+                                  )}
+                                </Fragment>
+                              ))}
+                              {colFilters.length === 0 && (
+                                <p className="text-sm text-zinc-500 dark:text-zinc-400 text-center py-2">
+                                  No filters added yet
+                                </p>
+                              )}
+                            </div>
+                          </Popover.Panel>
+                        </Transition>
+                      </>
+                    )}
+                  </Popover>
+
+                  <Popover className="relative z-20">
+                    {({ open }) => (
+                      <>
+                        <Popover.Button
+                          className={`inline-flex items-center gap-2 px-3 py-2 text-sm font-medium rounded-lg border transition-all ${
+                            open
+                              ? "bg-zinc-100 dark:bg-zinc-700 border-zinc-300 dark:border-zinc-600 text-zinc-900 dark:text-white ring-2 ring-primary/50"
+                              : "bg-zinc-50 dark:bg-zinc-700/50 border-zinc-200 dark:border-zinc-600 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700 hover:text-zinc-900 dark:hover:text-white"
+                          }`}
+                        >
+                          <IconUsers className="w-4 h-4" />
+                          <span>Columns</span>
+                        </Popover.Button>
+
+                        <Transition
+                          as={Fragment}
+                          enter="transition ease-out duration-200"
+                          enterFrom="opacity-0 translate-y-1"
+                          enterTo="opacity-100 translate-y-0"
+                          leave="transition ease-in duration-150"
+                          leaveFrom="opacity-100 translate-y-0"
+                          leaveTo="opacity-0 translate-y-1"
+                        >
+                          <Popover.Panel className="absolute left-0 z-50 mt-2 w-56 origin-top-left rounded-lg bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 shadow-2xl p-4 top-full">
+                            <div className="space-y-2">
+                              {table.getAllLeafColumns().map((column: any) => {
+                                if (
+                                  column.id !== "select" &&
+                                  column.id !== "info"
+                                ) {
+                                  return (
+                                    <label
+                                      key={column.id}
+                                      className="flex items-center space-x-2 cursor-pointer group"
+                                    >
+                                      <Checkbox
+                                        checked={column.getIsVisible()}
+                                        onChange={column.getToggleVisibilityHandler()}
+                                      />
+                                      <span className="text-sm text-zinc-700 dark:text-zinc-300 group-hover:text-zinc-900 dark:group-hover:text-white transition-colors">
+                                        {getSelectionName(column.id)}
+                                      </span>
+                                    </label>
+                                  );
+                                }
+                              })}
+                            </div>
+                          </Popover.Panel>
+                        </Transition>
+                      </>
+                    )}
+                  </Popover>
+
+                  <div className="hidden md:flex gap-1 border border-zinc-200 dark:border-zinc-600 rounded-lg p-0.5 bg-zinc-50 dark:bg-zinc-700/50">
+                    <Tooltip orientation="top" tooltipText="List view">
+                      <button
+                        onClick={() => handleLayoutChange("list")}
+                        className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 text-sm font-medium rounded-md transition-all ${
+                          viewLayout === "list"
+                            ? "bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white shadow-sm"
+                            : "text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-white"
+                        }`}
+                      >
+                        <IconLayoutList className="w-4 h-4" />
+                      </button>
+                    </Tooltip>
+                    <Tooltip orientation="top" tooltipText="Card view">
+                      <button
+                        onClick={() => handleLayoutChange("card")}
+                        className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 text-sm font-medium rounded-md transition-all ${
+                          viewLayout === "card"
+                            ? "bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white shadow-sm"
+                            : "text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-white"
+                        }`}
+                      >
+                        <IconLayoutGrid className="w-4 h-4" />
+                      </button>
+                    </Tooltip>
+                  </div>
+
+                  {hasExportPerm && (
+                  <Popover className="relative z-20">
+                    {({ open, close }) => (
+                      <>
+                        <Popover.Button
+                          className={`inline-flex items-center gap-2 px-3 py-2 text-sm font-medium rounded-lg border transition-all ${
+                            open
+                              ? "bg-zinc-100 dark:bg-zinc-700 border-zinc-300 dark:border-zinc-600 text-zinc-900 dark:text-white ring-2 ring-primary/50"
+                              : "bg-zinc-50 dark:bg-zinc-700/50 border-zinc-200 dark:border-zinc-600 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700 hover:text-zinc-900 dark:hover:text-white"
+                          }`}
+                        >
+                          <IconDownload className="w-4 h-4" />
+                          <span>Export</span>
+                        </Popover.Button>
+                        <Transition
+                          as={Fragment}
+                          enter="transition ease-out duration-200"
+                          enterFrom="opacity-0 translate-y-1"
+                          enterTo="opacity-100 translate-y-0"
+                          leave="transition ease-in duration-150"
+                          leaveFrom="opacity-100 translate-y-0"
+                          leaveTo="opacity-0 translate-y-1"
+                        >
+                          <Popover.Panel className="absolute left-0 z-50 mt-2 w-44 origin-top-left rounded-lg bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 shadow-2xl py-1 top-full">
+                            <p className="px-3 py-1.5 text-[10px] font-semibold text-zinc-400 dark:text-zinc-500 uppercase tracking-wide">Export Table</p>
+                            <button
+                              onClick={() => { exportData("csv"); close(); }}
+                              className="w-full flex items-center gap-2 px-3 py-2 text-sm text-zinc-700 dark:text-zinc-300 hover:bg-zinc-50 dark:hover:bg-zinc-700 transition-colors"
+                            >
+                              <IconDownload className="w-4 h-4 text-zinc-400" />
+                              Export as CSV
+                            </button>
+                            <button
+                              onClick={() => { exportData("xls"); close(); }}
+                              className="w-full flex items-center gap-2 px-3 py-2 text-sm text-zinc-700 dark:text-zinc-300 hover:bg-zinc-50 dark:hover:bg-zinc-700 transition-colors"
+                            >
+                              <IconDownload className="w-4 h-4 text-zinc-400" />
+                              Export as XLS
+                            </button>
+                          </Popover.Panel>
+                        </Transition>
+                      </>
+                    )}
+                  </Popover>
+                  )}
+                </div>
+
+                <div className="relative flex-1 md:flex-none md:w-56">
+                  <div className="relative">
+                    <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                      <IconSearch className="h-4 w-4 text-zinc-400 dark:text-zinc-500" />
+                    </div>
+                    <input
+                      type="text"
+                      value={searchQuery}
+                      onChange={(e) => updateSearchQuery(e.target.value)}
+                      className="block w-full pl-10 pr-3 py-[6px] border border-zinc-300 dark:border-zinc-600 rounded-lg bg-white dark:bg-zinc-900/50 text-zinc-900 dark:text-zinc-200 placeholder-zinc-500 dark:placeholder-zinc-500 focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-transparent transition-all"
+                      placeholder="Search staff..."
+                    />
+                  </div>
+
+                  {searchOpen && (
+                    <div className="absolute z-10 mt-1 w-full bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg shadow-xl">
+                      <div className="py-1 max-h-48 overflow-y-auto">
+                        {searchResults.length === 0 &&
+                          !isSearchingExternal &&
+                          externalSearchResults.length === 0 && (
+                            <div className="px-4 py-3 text-sm text-zinc-500 dark:text-zinc-400 text-center">
+                              <p>No results found in workspace</p>
+                              {searchQuery.trim().length >= 3 && (
+                                <button
+                                  onClick={searchExternally}
+                                  className="mt-2 inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-md bg-primary text-white hover:opacity-90 transition-opacity"
+                                >
+                                  <IconSearch className="w-3 h-3" />
+                                  Search on Roblox
+                                </button>
+                              )}
+                            </div>
+                          )}
+                        {isSearchingExternal && (
+                          <div className="px-4 py-3 text-sm text-zinc-500 dark:text-zinc-400 text-center">
+                            <IconLoader2 className="w-4 h-4 animate-spin inline-block mr-2" />
+                            Searching Roblox...
+                          </div>
+                        )}
+                        {externalSearchResults.length > 0 &&
+                          searchResults.length === 0 && (
+                            <>
+                              <div className="px-4 py-1 text-xs font-medium text-zinc-400 dark:text-zinc-500 uppercase tracking-wider">
+                                Roblox Results
+                              </div>
+                              {externalSearchResults.map((u: any) => (
+                                <button
+                                  key={u.userId}
+                                  onClick={() => openExternalProfile(u.userId)}
+                                  className="w-full text-left px-4 py-2 hover:bg-zinc-100 dark:hover:bg-zinc-700 flex items-center justify-between transition-colors group"
+                                >
+                                  <div className="flex items-center space-x-2">
+                                    <img
+                                      src={u.thumbnail}
+                                      alt={u.username}
+                                      className="w-6 h-6 rounded-full bg-zinc-300 dark:bg-zinc-600"
+                                    />
+                                    <span className="text-sm font-medium text-zinc-900 dark:text-zinc-200 group-hover:text-zinc-950 dark:group-hover:text-white transition-colors">
+                                      {u.username}
+                                    </span>
+                                  </div>
+                                  <IconExternalLink className="w-4 h-4 text-zinc-400 group-hover:text-zinc-600 dark:group-hover:text-zinc-300" />
+                                </button>
+                              ))}
+                            </>
+                          )}
+                        {searchResults.map((u: any) => (
+                          <button
+                            key={u.username}
+                            onClick={() => updateSearchFilter(u.username)}
+                            className="w-full text-left px-4 py-2 hover:bg-zinc-100 dark:hover:bg-zinc-700 flex items-center space-x-2 transition-colors group"
+                          >
+                            <img
+                              src={u.thumbnail}
+                              alt={u.username}
+                              className="w-6 h-6 rounded-full bg-primary"
+                            />
+                            <span className="text-sm font-medium text-zinc-900 dark:text-zinc-200 group-hover:text-zinc-950 dark:group-hover:text-white transition-colors">
+                              {u.username}
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {selectedViewId !== null &&
+                  (hasManageViews() ||
+                    localViews.some((v) => v.id === selectedViewId)) && (
+                    <button
+                      onClick={handleEditOrSaveView}
+                      className={`inline-flex items-center gap-2 px-3 py-2 text-sm font-medium rounded-lg border transition-all ${
+                        isEditMode
+                          ? hasUnsavedChanges()
+                            ? "bg-emerald-50 dark:bg-emerald-900/20 border-emerald-300 dark:border-emerald-700 text-emerald-700 dark:text-emerald-400 hover:bg-emerald-100 dark:hover:bg-emerald-900/30"
+                            : "bg-amber-50 dark:bg-amber-900/20 border-amber-300 dark:border-amber-700 text-amber-700 dark:text-amber-400 hover:bg-amber-100 dark:hover:bg-amber-900/30"
+                          : "bg-zinc-50 dark:bg-zinc-700/50 border-zinc-200 dark:border-zinc-600 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700 hover:text-zinc-900 dark:hover:text-white"
+                      }`}
+                    >
+                      {isEditMode ? (
+                        hasUnsavedChanges() ? (
+                          <>
+                            <IconDeviceFloppy className="w-4 h-4" />
+                            <span>Save</span>
+                          </>
+                        ) : (
+                          <>
+                            <IconX className="w-4 h-4" />
+                            <span>Cancel</span>
+                          </>
+                        )
+                      ) : (
+                        <>
+                          <IconPencil className="w-4 h-4" />
+                          <span>Edit</span>
+                        </>
+                      )}
+                    </button>
+                  )}
+              </div>
+
+              {table.getSelectedRowModel().flatRows.length > 0 && hasMassActionsPerm && (
+                <div className="mt-4 pt-4 border-t border-zinc-200 dark:border-zinc-700 flex flex-wrap gap-2">
+                  <span className="text-xs font-medium text-zinc-600 dark:text-zinc-400 py-2">
+                    {table.getSelectedRowModel().flatRows.length} selected
+                  </span>
+                  <button
+                    onClick={() => {
+                      setType("promotion");
+                      setIsOpen(true);
+                    }}
+                    className="inline-flex items-center gap-2 px-3 py-2 text-sm font-medium rounded-lg text-white bg-emerald-600/80 hover:bg-emerald-600 transition-all"
+                  >
+                    <IconUserCheck className="w-4 h-4" />
+                    Promote
+                  </button>
+                  <button
+                    onClick={() => {
+                      setType("warning");
+                      setIsOpen(true);
+                    }}
+                    className="inline-flex items-center gap-2 px-3 py-2 text-sm font-medium rounded-lg text-white bg-amber-600/80 hover:bg-amber-600 transition-all"
+                  >
+                    <IconAlertCircle className="w-4 h-4" />
+                    Warn
+                  </button>
+                  <button
+                    onClick={() => {
+                      setType("fire");
+                      setIsOpen(true);
+                    }}
+                    className="inline-flex items-center gap-2 px-3 py-2 text-sm font-medium rounded-lg text-white bg-red-600/80 hover:bg-red-600 transition-all"
+                  >
+                    <IconShieldX className="w-4 h-4" />
+                    Terminate
+                  </button>
+                  <button
+                    onClick={() => {
+                      setMinutes(0);
+                      setType("award_minutes");
+                      setIsOpen(true);
+                    }}
+                    className="inline-flex items-center gap-2 px-3 py-2 text-sm font-medium rounded-lg text-white bg-blue-600/80 hover:bg-blue-600 transition-all"
+                  >
+                    <IconPlus className="w-4 h-4" />
+                    Award Minutes
+                  </button>
+                  <button
+                    onClick={() => {
+                      setMinutes(0);
+                      setType("remove_minutes");
+                      setIsOpen(true);
+                    }}
+                    className="inline-flex items-center gap-2 px-3 py-2 text-sm font-medium rounded-lg text-white bg-orange-600/80 hover:bg-orange-600 transition-all"
+                  >
+                    <IconMinus className="w-4 h-4" />
+                    Remove Minutes
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {isLoading ? (
+              <div className="bg-white dark:bg-zinc-800/50 backdrop-blur-sm border border-zinc-200 dark:border-zinc-700/50 rounded-lg p-12">
+                <div className="flex flex-col items-center justify-center text-center">
+                  <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary mb-4"></div>
+                  <p className="text-sm text-zinc-600 dark:text-zinc-400">
+                    Loading staff data...
+                  </p>
+                </div>
+              </div>
+            ) : (
+              <>
+                <div
+                  className={`block space-y-4 ${viewLayout === "card" ? "md:grid md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 md:gap-4 md:space-y-0" : "md:hidden"}`}
+                >
+                  {table.getRowModel().rows.map((row) => {
+                    const user = row.original;
+                    const warnings = Array.isArray(user.book)
+                      ? user.book.filter((b: any) => b.type === "warning" && !b.redacted)
+                          .length
+                      : 0;
+                    const hosted = user.hostedSessions as any;
+                    const hostedLen =
+                      hosted && typeof hosted.length === "number"
+                        ? hosted.length
+                        : 0;
+
+                    const selectCell = row
+                      .getVisibleCells()
+                      .find((cell) => cell.column.id === "select");
+
+                    return (
+                      <div
+                        key={row.id}
+                        className="bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg p-4 space-y-3 overflow-hidden"
+                      >
+                        <div className="flex items-center gap-3 min-w-0">
+                          {selectCell && (
+                            <div className="flex-shrink-0">
+                              {flexRender(
+                                selectCell.column.columnDef.cell,
+                                selectCell.getContext(),
+                              )}
+                            </div>
+                          )}
+                          <div
+                            className={`flex items-center gap-2 flex-1 min-w-0 ${hasViewMemberProfiles ? "cursor-pointer" : "cursor-default"}`}
+                            onClick={(e) => {
+                              if (hasViewMemberProfiles) {
+                                const href = `/workspace/${router.query.id}/profile/${user.info.userId}`;
+                                if (e.ctrlKey || e.metaKey || e.shiftKey) {
+                                  window.open(href, '_blank');
+                                } else {
+                                  router.push(href);
+                                }
+                              }
+                            }}
+                          >
+                            <div
+                              className={`w-10 h-10 rounded-full flex items-center justify-center flex-shrink-0 ${getRandomBg(
+                                user.info.userId.toString(),
+                              )}`}
+                            >
+                              <img
+                                src={user.info.picture!}
+                                className="w-10 h-10 rounded-full object-cover border-2 border-white"
+                                style={{ background: "transparent" }}
+                              />
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <p className="font-semibold text-zinc-900 dark:text-white truncate">
+                                {user.info.username}
+                              </p>
+                              <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                                {user.rankName || "Guest"}
+                              </p>
+                            </div>
+                          </div>
+                          {(() => {
+                            const notices = user.inactivityNotices || [];
+                            const now = new Date();
+                            const approved = notices.filter(
+                              (n: any) =>
+                                n.approved === true &&
+                                n.reviewed === true &&
+                                n.revoked === false,
+                            );
+                            const active = approved.find(
+                              (n: any) =>
+                                n.endTime &&
+                                new Date(n.startTime) <= now &&
+                                new Date(n.endTime) >= now,
+                            );
+                            if (active) {
+                              return (
+                                <div
+                                  className="flex-shrink-0 my-auto"
+                                >
+                                  <IconBeach className="w-4 h-4 text-amber-500" />
+                                </div>
+                              );
+                            }
+                            const upcoming = approved.find(
+                              (n: any) => new Date(n.startTime) > now,
+                            );
+                            if (upcoming) {
+                              return (
+                                <div
+                                  className="flex-shrink-0 my-auto"
+                                >
+                                  <IconBeach className="w-4 h-4 text-emerald-500" />
+                                </div>
+                              );
+                            }
+                            const past = approved.find(
+                              (n: any) => n.endTime && new Date(n.endTime) < now,
+                            );
+                            if (past) {
+                              return (
+                                <div
+                                  className="flex-shrink-0 my-auto"
+                                >
+                                  <IconBeach className="w-4 h-4 text-zinc-400" />
+                                </div>
+                              );
+                            }
+                            return null;
+                          })()}
+                          <Tooltip orientation="top" tooltipText="Copy username">
+                            <button
+                              type="button"
+                              className="hidden md:flex p-1 my-auto rounded hover:bg-zinc-200 dark:hover:bg-zinc-700 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 transition-colors flex-shrink-0 leading-none"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                const username = user.info.username;
+                                if (username) {
+                                  navigator.clipboard.writeText(username);
+                                  toast.success(`Copied to clipboard`);
+                                }
+                              }}
+                            >
+                              <IconCopy className="w-3.5 h-3.5" />
+                            </button>
+                          </Tooltip>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-3 pt-3 border-t border-zinc-200 dark:border-zinc-700">
+                          {columnVisibility.minutes && (
+                            <div>
+                              <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                                Minutes
+                              </p>
+                              <p className="text-sm font-medium text-zinc-900 dark:text-white">
+                                {user.minutes}
+                              </p>
+                            </div>
+                          )}
+                          {columnVisibility.lastPeriodMinutes && (
+                            <div>
+                              <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                                Last Period
+                              </p>
+                              <p className="text-sm font-medium text-zinc-900 dark:text-white">
+                                {user.lastPeriodMinutes !== null
+                                  ? user.lastPeriodMinutes
+                                  : "-"}
+                              </p>
+                            </div>
+                          )}
+                          {columnVisibility.idleMinutes && (
+                            <div>
+                              <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                                Idle
+                              </p>
+                              <p className="text-sm font-medium text-zinc-900 dark:text-white">
+                                {user.idleMinutes}
+                              </p>
+                            </div>
+                          )}
+                          {columnVisibility.book && (
+                            <div>
+                              <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                                Warnings
+                              </p>
+                              <p className="text-sm font-medium text-zinc-900 dark:text-white">
+                                {warnings}
+                              </p>
+                            </div>
+                          )}
+                          {columnVisibility.hostedSessions && (
+                            <div>
+                              <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                                Hosted
+                              </p>
+                              <p className="text-sm font-medium text-zinc-900 dark:text-white">
+                                {hostedLen}
+                              </p>
+                            </div>
+                          )}
+                          {columnVisibility.sessionsAttended && (
+                            <div>
+                              <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                                Attended
+                              </p>
+                              <p className="text-sm font-medium text-zinc-900 dark:text-white">
+                                {user.sessionsAttended}
+                              </p>
+                            </div>
+                          )}
+                          {columnVisibility.lastPeriodSessionsHosted && (
+                            <div>
+                              <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                                Last Period Hosted
+                              </p>
+                              <p className="text-sm font-medium text-zinc-900 dark:text-white">
+                                {user.lastPeriodSessionsHosted !== null
+                                  ? user.lastPeriodSessionsHosted
+                                  : "-"}
+                              </p>
+                            </div>
+                          )}
+                          {columnVisibility.lastPeriodSessionsAttended && (
+                            <div>
+                              <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                                Last Period Attended
+                              </p>
+                              <p className="text-sm font-medium text-zinc-900 dark:text-white">
+                                {user.lastPeriodSessionsAttended !== null
+                                  ? user.lastPeriodSessionsAttended
+                                  : "-"}
+                              </p>
+                            </div>
+                          )}
+                          {columnVisibility.allianceVisits && (
+                            <div>
+                              <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                                Alliance Visits
+                              </p>
+                              <p className="text-sm font-medium text-zinc-900 dark:text-white">
+                                {user.allianceVisits}
+                              </p>
+                            </div>
+                          )}
+                          {columnVisibility.inactivityNotices && (
+                            <div>
+                              <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                                Notices
+                              </p>
+                              <p className="text-sm font-medium text-zinc-900 dark:text-white">
+                                {user.inactivityNotices.length}
+                              </p>
+                            </div>
+                          )}
+                          {columnVisibility.messages && (
+                            <div>
+                              <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                                Messages
+                              </p>
+                              <p className="text-sm font-medium text-zinc-900 dark:text-white">
+                                {user.messages}
+                              </p>
+                            </div>
+                          )}
+                          {columnVisibility.registered && (
+                            <div>
+                              <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                                Registered
+                              </p>
+                              <p className="text-sm font-medium text-zinc-900 dark:text-white">
+                                {user.registered ? "✅" : "❌"}
+                              </p>
+                            </div>
+                          )}
+                          {columnVisibility.quota && (
+                            <div>
+                              <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                                Quota
+                              </p>
+                              <p className="text-sm font-medium text-zinc-900 dark:text-white">
+                                {user.quota ? "✅" : "❌"}
+                              </p>
+                            </div>
+                          )}
+                          {columnVisibility.departments && (
+                            <div>
+                              <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                                Department
+                              </p>
+                              <p className="text-sm font-medium text-zinc-900 dark:text-white">
+                                {Array.isArray(user.departments) &&
+                                user.departments.length > 0
+                                  ? user.departments.join(", ")
+                                  : "-"}
+                              </p>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                <div
+                  className={`${viewLayout === "card" ? "block" : "hidden md:hidden"} bg-white dark:bg-zinc-800 md:dark:bg-zinc-800/50 border border-zinc-200 dark:border-zinc-700 rounded-lg md:rounded-none p-3 md:px-4 md:py-3 md:border-0 md:border-t mt-4 md:mt-0`}
+                >
+                  <div className="flex items-center justify-between md:justify-center gap-3 md:gap-2">
+                    <button
+                      onClick={() => {
+                        const newIndex = pagination.pageIndex - 1;
+                        setPagination((prev) => ({ ...prev, pageIndex: newIndex }));
+                        router.push({ pathname: router.pathname, query: { ...router.query, page: newIndex } }, undefined, { shallow: true });
+                      }}
+                      disabled={!table.getCanPreviousPage()}
+                      className="flex-1 md:flex-none md:inline-flex items-center md:gap-2 px-4 py-2.5 md:px-3 md:py-2 text-sm font-medium rounded-lg border border-zinc-300 dark:border-zinc-600 text-zinc-700 dark:text-zinc-300 bg-white md:bg-zinc-50 dark:bg-zinc-700/50 md:dark:bg-zinc-700/30 hover:bg-zinc-50 md:hover:bg-zinc-100 dark:hover:bg-zinc-700 md:dark:hover:bg-zinc-700/50 disabled:opacity-40 md:disabled:opacity-100 md:disabled:bg-zinc-100 md:dark:disabled:bg-zinc-800 disabled:cursor-not-allowed md:disabled:text-zinc-400 md:dark:disabled:text-zinc-500 transition-all"
+                    >
+                      Previous
+                    </button>
+                    <div className="flex md:inline-flex items-center px-3 py-2 md:px-4 md:py-2 text-xs md:text-sm font-medium text-zinc-600 dark:text-zinc-400 md:text-zinc-700 md:dark:text-zinc-300 whitespace-nowrap md:bg-zinc-100 md:dark:bg-zinc-700/50 md:border md:border-zinc-300 md:dark:border-zinc-600 md:rounded-lg">
+                      <span className="md:hidden text-zinc-900 dark:text-white font-semibold">
+                        {table.getState().pagination.pageIndex + 1}
+                      </span>
+                      <span className="md:hidden mx-1">/</span>
+                      <span className="md:hidden">{table.getPageCount()}</span>
+                      <span className="hidden md:inline">
+                        Page {table.getState().pagination.pageIndex + 1} of{" "}
+                        {table.getPageCount()}
+                      </span>
+                    </div>
+                    <button
+                      onClick={() => {
+                        const newIndex = pagination.pageIndex + 1;
+                        setPagination((prev) => ({ ...prev, pageIndex: newIndex }));
+                        router.push({ pathname: router.pathname, query: { ...router.query, page: newIndex } }, undefined, { shallow: true });
+                      }}
+                      disabled={!table.getCanNextPage()}
+                      className="flex-1 md:flex-none md:inline-flex items-center md:gap-2 px-4 py-2.5 md:px-3 md:py-2 text-sm font-medium rounded-lg border border-zinc-300 dark:border-zinc-600 text-zinc-700 dark:text-zinc-300 bg-white md:bg-zinc-50 dark:bg-zinc-700/50 md:dark:bg-zinc-700/30 hover:bg-zinc-50 md:hover:bg-zinc-100 dark:hover:bg-zinc-700 md:dark:hover:bg-zinc-700/50 disabled:opacity-40 md:disabled:opacity-100 md:disabled:bg-zinc-100 md:dark:disabled:bg-zinc-800 disabled:cursor-not-allowed md:disabled:text-zinc-400 md:dark:disabled:text-zinc-500 transition-all"
+                    >
+                      Next
+                    </button>
+                  </div>
+                </div>
+
+                <div
+                  className={`hidden ${viewLayout === "list" ? "md:block" : "md:hidden"} bg-white dark:bg-zinc-800/50 backdrop-blur-sm border border-zinc-200 dark:border-zinc-700/50 rounded-lg overflow-hidden`}
+                >
+                  <div className="overflow-x-auto">
+                    <table className="w-full table-auto md:table-fixed divide-y divide-zinc-200 dark:divide-zinc-700">
+                      <thead className="bg-zinc-50 dark:bg-zinc-800/80 border-b border-zinc-200 dark:border-zinc-700">
+                        {table.getHeaderGroups().map((headerGroup) => (
+                          <tr key={headerGroup.id}>
+                            {headerGroup.headers.map((header) => (
+                              <th
+                                key={header.id}
+                                scope="col"
+                                aria-sort={
+                                  header.column.getIsSorted?.() === "asc"
+                                    ? "ascending"
+                                    : header.column.getIsSorted?.() === "desc"
+                                      ? "descending"
+                                      : "none"
+                                }
+                                className={
+                                  `px-4 py-3 text-left text-xs font-semibold text-zinc-900 dark:text-zinc-300 uppercase tracking-widest cursor-pointer hover:bg-zinc-100 dark:hover:bg-zinc-700/50 transition-colors` +
+                                  (header.column.id === "info"
+                                    ? " md:w-1/4 min-w-[90px]"
+                                    : header.column.id === "select"
+                                      ? " w-12 text-center px-2"
+                                      : "")
+                                }
+                                onClick={header.column.getToggleSortingHandler()}
+                              >
+                                {header.isPlaceholder ? null : (
+                                  <div className="flex items-center space-x-2 text-zinc-900 dark:text-zinc-300">
+                                    <span>
+                                      {flexRender(
+                                        header.column.columnDef.header,
+                                        header.getContext(),
+                                      )}
+                                    </span>
+                                    <span className="text-zinc-500 dark:text-zinc-400">
+                                      {header.column.getIsSorted?.() ===
+                                      "asc" ? (
+                                        <IconArrowUp className="w-3 h-3" />
+                                      ) : header.column.getIsSorted?.() ===
+                                        "desc" ? (
+                                        <IconArrowDown className="w-3 h-3" />
+                                      ) : null}
+                                    </span>
+                                  </div>
+                                )}
+                              </th>
+                            ))}
+                          </tr>
+                        ))}
+                      </thead>
+                      <tbody className="bg-white dark:bg-zinc-900/20 divide-y divide-zinc-200 dark:divide-zinc-700">
+                        {table.getRowModel().rows.map((row) => (
+                          <tr
+                            key={row.id}
+                            className="hover:bg-zinc-100 dark:hover:bg-zinc-700/30 transition-colors border-b border-zinc-200 dark:border-zinc-700 last:border-b-0"
+                          >
+                            {row.getVisibleCells().map((cell) => (
+                              <td
+                                key={cell.id}
+                                className={
+                                  cell.column.id === "info"
+                                    ? "pl-1 pr-2 py-3 text-sm text-zinc-700 dark:text-zinc-300 overflow-hidden"
+                                    : cell.column.id === "select"
+                                      ? "px-2 py-3 text-sm text-zinc-700 dark:text-zinc-300 overflow-hidden text-center"
+                                      : "px-4 py-3 text-sm text-zinc-700 dark:text-zinc-300 overflow-hidden"
+                                }
+                                style={
+                                  cell.column.id === "info"
+                                    ? {
+                                        minWidth: 90,
+                                        maxWidth: "30%",
+                                        minHeight: 44,
+                                      }
+                                    : cell.column.id === "select"
+                                      ? { width: 48 }
+                                      : { maxWidth: 0 }
+                                }
+                              >
+                                {flexRender(
+                                  cell.column.columnDef.cell,
+                                  cell.getContext(),
+                                )}
+                              </td>
+                            ))}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <div className="bg-white dark:bg-zinc-800/50 px-4 py-3 flex items-center justify-center border-t border-zinc-200 dark:border-zinc-700">
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => {
+                          const newIndex = pagination.pageIndex - 1;
+                          setPagination((prev) => ({ ...prev, pageIndex: newIndex }));
+                          router.push({ pathname: router.pathname, query: { ...router.query, page: newIndex } }, undefined, { shallow: true });
+                        }}
+                        disabled={!table.getCanPreviousPage()}
+                        className="inline-flex items-center gap-2 px-3 py-2 text-sm font-medium rounded-lg border border-zinc-300 dark:border-zinc-600 text-zinc-700 dark:text-zinc-300 bg-zinc-50 dark:bg-zinc-700/30 hover:bg-zinc-100 dark:hover:bg-zinc-700/50 disabled:bg-zinc-100 dark:disabled:bg-zinc-800 disabled:cursor-not-allowed disabled:text-zinc-400 dark:disabled:text-zinc-500 transition-all"
+                      >
+                        Previous
+                      </button>
+                      <span className="inline-flex items-center px-4 py-2 bg-zinc-100 dark:bg-zinc-700/50 border border-zinc-300 dark:border-zinc-600 rounded-lg text-sm font-medium text-zinc-700 dark:text-zinc-300">
+                        Page {table.getState().pagination.pageIndex + 1} of{" "}
+                        {table.getPageCount()}
+                      </span>
+                      <button
+                        onClick={() => {
+                          const newIndex = pagination.pageIndex + 1;
+                          setPagination((prev) => ({ ...prev, pageIndex: newIndex }));
+                          router.push({ pathname: router.pathname, query: { ...router.query, page: newIndex } }, undefined, { shallow: true });
+                        }}
+                        disabled={!table.getCanNextPage()}
+                        className="inline-flex items-center gap-2 px-3 py-2 text-sm font-medium rounded-lg border border-zinc-300 dark:border-zinc-600 text-zinc-700 dark:text-zinc-300 bg-zinc-50 dark:bg-zinc-700/30 hover:bg-zinc-100 dark:hover:bg-zinc-700/50 disabled:bg-zinc-100 dark:disabled:bg-zinc-800 disabled:cursor-not-allowed disabled:text-zinc-400 dark:disabled:text-zinc-500 transition-all"
+                      >
+                        Next
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+
+        <Transition appear show={isOpen} as={Fragment}>
+          <Dialog
+            as="div"
+            className="relative z-50"
+            onClose={() => setIsOpen(false)}
+          >
+            <Transition.Child
+              as={Fragment}
+              enter="ease-out duration-300"
+              enterFrom="opacity-0"
+              enterTo="opacity-100"
+              leave="ease-in duration-200"
+              leaveFrom="opacity-100"
+              leaveTo="opacity-0"
+            >
+              <div className="fixed inset-0 bg-black/25" />
+            </Transition.Child>
+
+            <div className="fixed inset-0 overflow-y-auto">
+              <div className="flex min-h-full items-center justify-center p-4 text-center">
+                <Transition.Child
+                  as={Fragment}
+                  enter="ease-out duration-300"
+                  enterFrom="opacity-0 scale-95"
+                  enterTo="opacity-100 scale-100"
+                  leave="ease-in duration-200"
+                  leaveFrom="opacity-100 scale-100"
+                  leaveTo="opacity-0 scale-95"
+                >
+                  <Dialog.Panel className="w-full max-w-md transform overflow-hidden rounded-2xl bg-white dark:bg-zinc-800 p-5 text-left align-middle shadow-xl transition-all">
+                    <Dialog.Title
+                      as="div"
+                      className="flex items-center justify-between mb-3"
+                    >
+                      <h3 className="text-lg font-medium text-zinc-900 dark:text-white">
+                        {type === "add" ? "Mass Add Minutes" : type === "award_minutes" ? "Mass Award Minutes" : type === "remove_minutes" ? "Mass Remove Minutes" : `Mass ${type}`}
+                      </h3>
+                      <button
+                        onClick={() => setIsOpen(false)}
+                        className="text-zinc-400 hover:text-zinc-500"
+                      >
+                        <IconX className="w-5 h-5" />
+                      </button>
+                    </Dialog.Title>
+
+                    <FormProvider
+                      {...useForm({
+                        defaultValues: {
+                          value: (type === "add" || type === "award_minutes" || type === "remove_minutes") ? minutes.toString() : message,
+                        },
+                      })}
+                    >
+                      <div className="mt-3">
+                        <Input
+                          type={(type === "add" || type === "award_minutes" || type === "remove_minutes") ? "number" : "text"}
+                          placeholder={(type === "add" || type === "award_minutes" || type === "remove_minutes") ? "Minutes" : "Message"}
+                          value={(type === "add" || type === "award_minutes" || type === "remove_minutes") ? minutes.toString() : message}
+                          name="value"
+                          id="value"
+                          onBlur={async () => true}
+                          onChange={async (e) => {
+                            if (type === "add" || type === "award_minutes" || type === "remove_minutes") {
+                              setMinutes(parseInt(e.target.value) || 0);
+                            } else {
+                              setMessage(e.target.value);
+                            }
+                            return true;
+                          }}
+                        />
+                      </div>
+                    </FormProvider>
+
+                    {bloxlinkEnabled &&
+                      discordEnabled &&
+                      (type === "warning" ||
+                        type === "promotion" ||
+                        type === "demotion" ||
+                        type === "termination" ||
+                        type === "fire") && (
+                        <div className="mt-4 bg-blue-50 dark:bg-blue-900/30 border border-blue-200 dark:border-blue-700 p-3 rounded-lg">
+                          <div className="flex items-start space-x-3">
+                            <input
+                              id="notify-discord-mass"
+                              type="checkbox"
+                              checked={notifyDiscord}
+                              onChange={(e) =>
+                                setNotifyDiscord(e.target.checked)
+                              }
+                              className="mt-1 w-4 h-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500"
+                            />
+                            <label
+                              htmlFor="notify-discord-mass"
+                              className="text-sm"
+                            >
+                              <div className="font-medium text-blue-800 dark:text-blue-200">
+                                Notify users via Discord DM
+                              </div>
+                              <div className="text-xs text-blue-700 dark:text-blue-300">
+                                Send Discord direct messages to all affected
+                                users (requires linked Bloxlink accounts)
+                              </div>
+                            </label>
+                          </div>
+                        </div>
+                      )}
+
+                    {bloxlinkEnabled &&
+                      (type === "termination" || type === "fire") &&
+                      notifyDiscord && (
+                        <div className="mt-4 bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-700 p-4 rounded-lg">
+                          <h4 className="text-sm font-medium text-red-800 dark:text-red-200 mb-3">
+                            Discord Server Actions
+                          </h4>
+                          <div className="space-y-3">
+                            <div className="flex items-center space-x-3">
+                              <input
+                                id="kick-discord-mass"
+                                type="checkbox"
+                                checked={kickFromDiscord}
+                                onChange={(e) => {
+                                  setKickFromDiscord(e.target.checked);
+                                  if (e.target.checked)
+                                    setBanFromDiscord(false);
+                                }}
+                                className="w-4 h-4 text-red-600 bg-white border-red-300 rounded focus:ring-red-500 focus:ring-2"
+                              />
+                              <label
+                                htmlFor="kick-discord-mass"
+                                className="text-sm text-red-700 dark:text-red-300 cursor-pointer"
+                              >
+                                Kick from Discord server
+                              </label>
+                            </div>
+                            <div className="flex items-start space-x-3">
+                              <input
+                                id="ban-discord-mass"
+                                type="checkbox"
+                                checked={banFromDiscord}
+                                onChange={(e) => {
+                                  setBanFromDiscord(e.target.checked);
+                                  if (e.target.checked)
+                                    setKickFromDiscord(false);
+                                }}
+                                className="mt-1 w-4 h-4 text-red-600 bg-white border-red-300 rounded focus:ring-red-500 focus:ring-2"
+                              />
+                              <div className="flex-1">
+                                <label
+                                  htmlFor="ban-discord-mass"
+                                  className="text-sm text-red-700 dark:text-red-300 cursor-pointer"
+                                >
+                                  Ban from Discord server
+                                </label>
+                                {banFromDiscord && (
+                                  <div className="mt-2">
+                                    <label className="block text-xs text-red-600 dark:text-red-400 mb-1">
+                                      Delete message history:
+                                    </label>
+                                    <select
+                                      value={banDeleteDays}
+                                      onChange={(e) =>
+                                        setBanDeleteDays(
+                                          parseInt(e.target.value),
+                                        )
+                                      }
+                                      className="text-xs px-2 py-1 border border-red-200 dark:border-red-600 rounded bg-white dark:bg-zinc-800 text-red-700 dark:text-red-300"
+                                    >
+                                      <option value={0}>
+                                        Don't delete messages
+                                      </option>
+                                      <option value={1}>1 day</option>
+                                      <option value={2}>2 days</option>
+                                      <option value={3}>3 days</option>
+                                      <option value={7}>7 days</option>
+                                    </select>
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
+                    <div className="mt-5 flex justify-end gap-2">
+                      <button
+                        type="button"
+                        className="inline-flex justify-center px-3 py-1.5 text-sm font-medium text-zinc-700 bg-white dark:text-white dark:bg-zinc-800 border border-gray-300 rounded-md hover:bg-zinc-50 dark:bg-zinc-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-primary"
+                        onClick={() => setIsOpen(false)}
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        className="inline-flex justify-center px-3 py-1.5 text-sm font-medium text-white bg-primary border border-transparent rounded-md hover:bg-primary/90 focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-primary"
+                        onClick={massAction}
+                      >
+                        Confirm
+                      </button>
+                    </div>
+                  </Dialog.Panel>
+                </Transition.Child>
+              </div>
+            </div>
+          </Dialog>
+        </Transition>
+
+        <Transition appear show={isSaveOpen} as={Fragment}>
+          <Dialog
+            as="div"
+            className="relative z-50"
+            onClose={() => setIsSaveOpen(false)}
+          >
+            <Transition.Child
+              as={Fragment}
+              enter="ease-out duration-300"
+              enterFrom="opacity-0"
+              enterTo="opacity-100"
+              leave="ease-in duration-200"
+              leaveFrom="opacity-100"
+              leaveTo="opacity-0"
+            >
+              <div className="fixed inset-0 bg-black/25" />
+            </Transition.Child>
+            <div className="fixed inset-0 overflow-y-auto">
+              <div className="flex min-h-full items-center justify-center p-4 text-center">
+                <Transition.Child
+                  as={Fragment}
+                  enter="ease-out duration-300"
+                  enterFrom="opacity-0 scale-95"
+                  enterTo="opacity-100 scale-100"
+                  leave="ease-in duration-200"
+                  leaveFrom="opacity-100 scale-100"
+                  leaveTo="opacity-0 scale-95"
+                >
+                  <Dialog.Panel className="w-full max-w-md transform overflow-y-auto rounded-none sm:rounded-2xl bg-white dark:bg-zinc-800 p-5 text-left shadow-xl transition-all fixed top-12 bottom-16 left-0 right-0 sm:relative sm:inset-auto sm:h-auto sm:max-h-[85vh]">
+                    <Dialog.Title
+                      as="div"
+                      className="flex items-center justify-between mb-3"
+                    >
+                      <h3 className="text-lg font-medium text-zinc-900 dark:text-white">
+                        Create View
+                      </h3>
+                      <button
+                        onClick={() => setIsSaveOpen(false)}
+                        className="text-zinc-400 hover:text-zinc-500"
+                      >
+                        <IconX className="w-5 h-5" />
+                      </button>
+                    </Dialog.Title>
+                    <div className="mt-3 space-y-3">
+                      {hasCreateViews() ? (
+                        <div>
+                          <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-200 mb-2">
+                            Type <span className="text-red-500">*</span>
+                          </label>
+                          <div className="flex gap-2">
+                            <button
+                              type="button"
+                              onClick={() => setSaveType("team")}
+                              className={`flex-1 px-3 py-2 text-sm font-medium rounded-lg border transition-all ${
+                                saveType === "team"
+                                  ? "bg-primary text-white border-transparent"
+                                  : "bg-zinc-50 dark:bg-zinc-700/50 border-zinc-200 dark:border-zinc-600 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700"
+                              }`}
+                            >
+                              <div className="flex items-center justify-center gap-2">
+                                <IconUsers className="w-4 h-4" />
+                                Team
+                              </div>
+                              <p
+                                className={`text-xs mt-1 ${saveType === "team" ? "text-white/70" : "text-zinc-500 dark:text-zinc-400"}`}
+                              >
+                                Visible to everyone
+                              </p>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setSaveType("local")}
+                              className={`flex-1 px-3 py-2 text-sm font-medium rounded-lg border transition-all ${
+                                saveType === "local"
+                                  ? "bg-primary text-white border-transparent"
+                                  : "bg-zinc-50 dark:bg-zinc-700/50 border-zinc-200 dark:border-zinc-600 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700"
+                              }`}
+                            >
+                              <div className="flex items-center justify-center gap-2">
+                                <IconLock className="w-4 h-4" />
+                                Local
+                              </div>
+                              <p
+                                className={`text-xs mt-1 ${saveType === "local" ? "text-white/70" : "text-zinc-500 dark:text-zinc-400"}`}
+                              >
+                                Only visible to you
+                              </p>
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="px-3 py-2 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg">
+                          <div className="flex items-center gap-2">
+                            <IconLock className="w-4 h-4 text-blue-600 dark:text-blue-400" />
+                            <p className="text-sm text-blue-800 dark:text-blue-300">
+                              Creating a{" "}
+                              <span className="font-semibold">local view</span>{" "}
+                              (only visible to you)
+                            </p>
+                          </div>
+                        </div>
+                      )}
+                      <div>
+                        <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-200 mb-2">
+                          Name <span className="text-red-500">*</span>
+                        </label>
+                        <Input
+                          name="save-name"
+                          value={saveName}
+                          onChange={(e) => {
+                            setSaveName(e.target.value);
+                            return Promise.resolve();
+                          }}
+                          onBlur={() => Promise.resolve()}
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-200 mb-2">
+                          Colour <span className="text-red-500">*</span>
+                        </label>
+                        <div className="flex flex-wrap gap-2">
+                          {[
+                            "#fef2f2",
+                            "#fef3c7",
+                            "#ecfeff",
+                            "#fff7ed",
+                            "#f5f3ff",
+                            "#fff2c0ff",
+                            "#d1fae5",
+                            "#e0f2fe",
+                            "#fee2e2",
+                            "#fee7f6",
+                            "#fcd7d7ff",
+                            "#f8e494ff",
+                            "#c1fcffff",
+                            "#fdd6a6ff",
+                            "#b7a9ffff",
+                            "#fde68a",
+                            "#aaffd3ff",
+                            "#e0f2fe",
+                            "#ffbcbcff",
+                            "#ffbce8ff",
+                          ].map((c) => (
+                            <button
+                              key={c}
+                              type="button"
+                              onMouseDown={(e) => { e.preventDefault(); setSaveColor(c); }}
+                              className={`w-8 h-8 rounded-md border dark:border-zinc-600 ${
+                                saveColor === c
+                                  ? "ring-2 ring-offset-1 ring-primary dark:ring-white/30"
+                                  : ""
+                              }`}
+                              style={{ background: c }}
+                            />
+                          ))}
+                        </div>
+
+                        <div className="mt-3">
+                          <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-200 mb-2">
+                            Icon <span className="text-red-500">*</span>
+                          </label>
+                          <div className="flex flex-wrap gap-2">
+                            {ICON_OPTIONS.map((opt) => {
+                              const IconComp = opt.Icon;
+                              return (
+                                <button
+                                  key={opt.key}
+                                  type="button"
+                                  onMouseDown={(e) => { e.preventDefault(); setSaveIcon(opt.key); }}
+                                  className={`w-9 h-9 rounded-md flex items-center justify-center text-lg border dark:border-zinc-600 ${
+                                    saveIcon === opt.key
+                                      ? "ring-2 ring-offset-1 ring-primary dark:ring-white/30"
+                                      : ""
+                                  }`}
+                                >
+                                  <IconComp className="w-5 h-5 text-zinc-900 dark:text-zinc-100" />
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="mt-5 flex justify-end gap-2">
+                      <button
+                        type="button"
+                        className="inline-flex justify-center px-3 py-1.5 text-sm font-medium text-zinc-700 dark:text-white bg-white dark:bg-zinc-800 border border-gray-300 rounded-md hover:bg-zinc-50"
+                        onClick={() => setIsSaveOpen(false)}
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        className="inline-flex justify-center px-3 py-1.5 text-sm font-medium text-white bg-primary border border-transparent rounded-md hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed"
+                        onClick={saveCurrentView}
+                        disabled={!saveName.trim() || !saveColor || !saveIcon}
+                      >
+                        Save
+                      </button>
+                    </div>
+                  </Dialog.Panel>
+                </Transition.Child>
+              </div>
+            </div>
+          </Dialog>
+        </Transition>
+        {showDeleteModal && (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+            <div className="bg-white dark:bg-zinc-800 rounded-lg shadow-xl p-6 w-full max-w-sm text-center">
+              <h2 className="text-lg font-semibold text-zinc-900 dark:text-white mb-4">
+                Confirm Deletion
+              </h2>
+              <p className="text-sm text-zinc-600 dark:text-zinc-300">
+                Are you sure you want to delete this view?
+              </p>
+              <p className="text-sm text-zinc-600 dark:text-zinc-300 mb-6">
+                This action cannot be undone.
+              </p>
+              <div className="flex justify-center gap-4">
+                <button
+                  onClick={() => {
+                    setShowDeleteModal(false);
+                    setViewToDelete(null);
+                  }}
+                  className="px-4 py-2 rounded-md bg-zinc-100 dark:bg-zinc-700 hover:bg-zinc-200 dark:hover:bg-zinc-600 text-zinc-800 dark:text-white"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={confirmDeleteSavedView}
+                  className="px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600"
+                >
+                  Delete
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+const BG_COLORS = [
+  "bg-amber-200",
+  "bg-red-300",
+  "bg-lime-200",
+  "bg-emerald-300",
+  "bg-rose-200",
+  "bg-green-100",
+  "bg-teal-200",
+  "bg-yellow-200",
+  "bg-red-100",
+  "bg-green-300",
+  "bg-lime-300",
+  "bg-emerald-200",
+  "bg-rose-300",
+  "bg-amber-300",
+  "bg-red-200",
+  "bg-green-200",
+];
+
+function getRandomBg(userid: string, username?: string) {
+  const key = `${userid ?? ""}:${username ?? ""}`;
+  let hash = 5381;
+  for (let i = 0; i < key.length; i++) {
+    hash = ((hash << 5) - hash) ^ key.charCodeAt(i);
+  }
+  const index = (hash >>> 0) % BG_COLORS.length;
+  return BG_COLORS[index];
+}
+
+const Filter: React.FC<{
+  data: {
+    column: string;
+    filter: string;
+    value: string;
+  };
+  updateFilter: (column: string, op: string, value: string) => void;
+  deleteFilter: () => void;
+  ranks: {
+    id: number;
+    name: string;
+    rank: number;
+  }[];
+  departments: Array<{ id: string; name: string; color: string | null }>;
+}> = ({ updateFilter, deleteFilter, data, ranks, departments }) => {
+  const updateFilterRef = useRef(updateFilter);
+  useEffect(() => {
+    updateFilterRef.current = updateFilter;
+  }, [updateFilter]);
+
+  const validCol =
+    data.column && filters[data.column] ? data.column : "username";
+
+  const methods = useForm<{
+    col: string;
+    op: string;
+    value: string;
+  }>({
+    defaultValues: {
+      col: validCol,
+      op: data.filter || "equal",
+      value: data.value || "",
+    },
+  });
+
+  const { register, handleSubmit, getValues } = methods;
+
+  useEffect(() => {
+    const subscription = methods.watch(() => {
+      updateFilterRef.current(
+        methods.getValues().col,
+        methods.getValues().op,
+        methods.getValues().value,
+      );
+    });
+    return () => subscription.unsubscribe();
+  }, [methods]);
+
+  return (
+    <FormProvider {...methods}>
+      <div className="space-y-4">
+        <button
+          onClick={deleteFilter}
+          className="inline-flex items-center px-3 py-2 border border-gray-300 rounded-md text-sm font-medium text-zinc-700 dark:text-white bg-white dark:bg-zinc-800 hover:bg-zinc-50 dark:bg-zinc-800 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary"
+        >
+          Delete Filter
+        </button>
+
+        <div className="space-y-2">
+          <label className="block text-sm font-medium text-zinc-700 dark:text-white">
+            Column
+          </label>
+          <select
+            {...register("col")}
+            className="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 dark:border-zinc-600 dark:bg-zinc-800 dark:text-white focus:outline-none focus:ring-primary focus:border-primary sm:text-sm rounded-md"
+          >
+            {Object.keys(filters).map((filter) => (
+              <option value={filter} key={filter}>
+                {filter}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="space-y-2">
+          <label className="block text-sm font-medium text-zinc-700 dark:text-white">
+            Operation
+          </label>
+          <select
+            {...register("op")}
+            className="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 dark:border-zinc-600 dark:bg-zinc-800 dark:text-white focus:outline-none focus:ring-primary focus:border-primary sm:text-sm rounded-md"
+          >
+            {(filters[methods.getValues().col] || filters["username"]).map(
+              (filter) => (
+                <option value={filter} key={filter}>
+                  {filterNames[filter]}
+                </option>
+              ),
+            )}
+          </select>
+        </div>
+
+        {getValues("col") !== "rank" &&
+          getValues("col") !== "registered" &&
+          getValues("col") !== "quota" &&
+          getValues("col") !== "quotaFailed" &&
+          getValues("col") !== "department" && (
+            <div className="space-y-2">
+              <label className="block text-sm font-medium text-zinc-700 dark:text-white">
+                Value
+              </label>
+              <Input {...register("value")} />
+            </div>
+          )}
+
+        {getValues("col") === "rank" && (
+          <div className="space-y-2">
+            <label className="block text-sm font-medium text-zinc-700 dark:text-white">
+              Value
+            </label>
+            <select
+              {...register("value")}
+              className="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 dark:border-zinc-600 dark:bg-zinc-800 dark:text-white focus:outline-none focus:ring-primary focus:border-primary sm:text-sm rounded-md"
+            >
+              {ranks.map((rank) => (
+                <option value={rank.rank} key={rank.id}>
+                  {rank.name}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+
+        {getValues("col") === "registered" && (
+          <div className="space-y-2">
+            <label className="block text-sm font-medium text-zinc-700 dark:text-white">
+              Value
+            </label>
+            <select
+              {...register("value")}
+              className="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 dark:border-zinc-600 dark:bg-zinc-800 dark:text-white focus:outline-none focus:ring-primary focus:border-primary sm:text-sm rounded-md"
+            >
+              <option value="true">✅</option>
+              <option value="false">❌</option>
+            </select>
+          </div>
+        )}
+
+        {getValues("col") === "quota" && (
+          <div className="space-y-2">
+            <label className="block text-sm font-medium text-zinc-700 dark:text-white">
+              Value
+            </label>
+            <select
+              {...register("value")}
+              className="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 dark:border-zinc-600 dark:bg-zinc-800 dark:text-white focus:outline-none focus:ring-primary focus:border-primary sm:text-sm rounded-md"
+            >
+              <option value="true">✅</option>
+              <option value="false">❌</option>
+            </select>
+          </div>
+        )}
+
+        {getValues("col") === "quotaFailed" && (
+          <div className="space-y-2">
+            <label className="block text-sm font-medium text-zinc-700 dark:text-white">
+              Value
+            </label>
+            <select
+              {...register("value")}
+              className="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 dark:border-zinc-600 dark:bg-zinc-800 dark:text-white focus:outline-none focus:ring-primary focus:border-primary sm:text-sm rounded-md"
+            >
+              <option value="true">❌ (Failed)</option>
+              <option value="false">✅ (Passed)</option>
+            </select>
+          </div>
+        )}
+
+        {getValues("col") === "department" && (
+          <div className="space-y-2">
+            <label className="block text-sm font-medium text-zinc-700 dark:text-white">
+              Value
+            </label>
+            <select
+              {...register("value")}
+              className="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 dark:border-zinc-600 dark:bg-zinc-800 dark:text-white focus:outline-none focus:ring-primary focus:border-primary sm:text-sm rounded-md"
+            >
+              {departments.map((dept) => (
+                <option value={dept.name} key={dept.id}>
+                  {dept.name}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+      </div>
+    </FormProvider>
+  );
+};
+
+Views.layout = workspace;
+export default Views;

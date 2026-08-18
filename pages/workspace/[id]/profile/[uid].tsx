@@ -1,0 +1,1521 @@
+import Activity from "@/components/profile/activity";
+import Book from "@/components/profile/book";
+import Notices from "@/components/profile/notices";
+import toast, { Toaster } from "react-hot-toast";
+import { InformationTab } from "@/components/profile/information";
+import workspace from "@/layouts/workspace";
+import { pageWithLayout } from "@/layoutTypes";
+import { withPermissionCheckSsr } from "@/utils/permissionsManager";
+import { withSessionSsr } from "@/lib/withSession";
+import { loginState } from "@/state";
+import { Tab } from "@headlessui/react";
+import {
+  getDisplayName,
+  getUsername,
+  getThumbnail,
+} from "@/utils/userinfoEngine";
+import { getRobloxUser } from "@/utils/roblox";
+import { ActivitySession, Quota, ActivityAdjustment } from "@prisma/client";
+import prisma from "@/utils/database";
+import moment from "moment";
+import { InferGetServerSidePropsType } from "next";
+import { useRecoilState } from "recoil";
+import {
+  IconUserCircle,
+  IconHistory,
+  IconBell,
+  IconBook,
+  IconClipboard,
+  IconChevronLeft,
+  IconChevronRight,
+  IconCalendar,
+  IconSun,
+  IconMoon,
+  IconCloud,
+  IconStars,
+  IconExternalLink,
+  IconBeach,
+} from "@tabler/icons-react";
+import { useRouter } from "next/router";
+import React, { useEffect, useState } from "react";
+import axios from "axios";
+import { getGroupRoles } from "@/utils/roblox";
+import { areaBasedToIANATimezone } from "@/utils/timezoneUtils";
+
+export const getServerSideProps = withPermissionCheckSsr(
+  async ({ query, req }) => {
+    const currentUserId = req.session?.userid;
+    if (!currentUserId) return { notFound: true };
+
+    const currentUser = await prisma.user.findFirst({
+      where: {
+        userid: BigInt(currentUserId),
+      },
+      include: {
+        roles: {
+          where: {
+            workspaceGroupId: parseInt(query.id as string),
+          },
+          include: {
+            quotaRoles: {
+              include: {
+                quota: true,
+              },
+            },
+          },
+        },
+        workspaceMemberships: {
+          where: {
+            workspaceGroupId: parseInt(query.id as string),
+          },
+        },
+      },
+    });
+    const membership = currentUser?.workspaceMemberships?.[0];
+    const isAdmin = membership?.isAdmin || false;
+    const hasManagePermission =
+      isAdmin ||
+      (currentUser?.roles?.some((role) =>
+        role.permissions?.includes("view_member_profiles"),
+      ) ??
+        false);
+
+    const hasManageMembersPermission =
+      isAdmin ||
+      (currentUser?.roles?.some((role) =>
+        role.permissions?.includes("edit_member_details"),
+      ) ??
+        false);
+
+    const hasManageNoticesPermission =
+      isAdmin ||
+      (currentUser?.roles?.some((role) =>
+        role.permissions?.includes("manage_notices"),
+      ) ??
+        false);
+
+    const hasApproveNoticesPermission =
+      isAdmin ||
+      (currentUser?.roles?.some((role) =>
+        role.permissions?.includes("approve_notices"),
+      ) ??
+        false);
+
+    const hasRecordNoticesPermission =
+      isAdmin ||
+      (currentUser?.roles?.some((role) =>
+        role.permissions?.includes("record_notices"),
+      ) ??
+        false);
+
+    const hasActivityAdjustmentsPermission =
+      isAdmin ||
+      (currentUser?.roles?.some((role) =>
+        role.permissions?.includes("activity_adjustments"),
+      ) ??
+        false);
+
+    const canSignoffQuotas =
+      isAdmin ||
+      (currentUser?.roles?.some((role) =>
+        role.permissions?.includes("signoff_custom_quotas"),
+      ) ??
+        false);
+
+    const logbookPermissions = {
+      view:
+        isAdmin ||
+        (currentUser?.roles?.some((role) =>
+          role.permissions?.includes("view_logbook"),
+        ) ??
+          false),
+      rank:
+        isAdmin ||
+        (currentUser?.roles?.some((role) =>
+          role.permissions?.includes("rank_users"),
+        ) ??
+          false),
+      note:
+        isAdmin ||
+        (currentUser?.roles?.some((role) =>
+          role.permissions?.includes("logbook_note"),
+        ) ??
+          false),
+      warning:
+        isAdmin ||
+        (currentUser?.roles?.some((role) =>
+          role.permissions?.includes("logbook_warning"),
+        ) ??
+          false),
+      promotion:
+        isAdmin ||
+        (currentUser?.roles?.some((role) =>
+          role.permissions?.includes("logbook_promotion"),
+        ) ??
+          false),
+      demotion:
+        isAdmin ||
+        (currentUser?.roles?.some((role) =>
+          role.permissions?.includes("logbook_demotion"),
+        ) ??
+          false),
+      termination:
+        isAdmin ||
+        (currentUser?.roles?.some((role) =>
+          role.permissions?.includes("logbook_termination"),
+        ) ??
+          false),
+      resignation:
+        isAdmin ||
+        (currentUser?.roles?.some((role) =>
+          role.permissions?.includes("logbook_resignation"),
+        ) ??
+          false),
+      redact:
+        isAdmin ||
+        (currentUser?.roles?.some((role) =>
+          role.permissions?.includes("logbook_redact"),
+        ) ??
+          false),
+    };
+
+    const hasAnyLogbookPermission = Object.values(logbookPermissions).some(
+      (p) => p,
+    );
+
+    if (!hasManagePermission) {
+      return { notFound: true };
+    }
+
+    let userTakingAction = await prisma.user.findFirst({
+      where: {
+        userid: BigInt(query.uid as string),
+      },
+      include: {
+        roles: {
+          where: {
+            workspaceGroupId: parseInt(query.id as string),
+          },
+          include: {
+            quotaRoles: {
+              include: {
+                quota: true,
+              },
+            },
+          },
+        },
+        workspaceMemberships: {
+          where: {
+            workspaceGroupId: parseInt(query.id as string),
+          },
+          include: {
+            departmentMembers: {
+              include: {
+                department: {
+                  include: {
+                    quotaDepartments: {
+                      include: {
+                        quota: true,
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+
+    if (!userTakingAction) {
+      try {
+        const userId = BigInt(query.uid as string);
+        const robloxUser = await getRobloxUser(userId);
+        if (!robloxUser) return { notFound: true };
+        const username = robloxUser.name;
+        const thumbnail = await getThumbnail(userId);
+        const displayName = robloxUser.displayName;
+
+        userTakingAction = await prisma.user.create({
+          data: {
+            userid: userId,
+            username: username,
+            picture: thumbnail,
+            registered: false,
+          },
+          include: {
+            roles: {
+              where: {
+                workspaceGroupId: parseInt(query.id as string),
+              },
+              include: {
+                quotaRoles: {
+                  include: {
+                    quota: true,
+                  },
+                },
+              },
+            },
+            workspaceMemberships: {
+              where: {
+                workspaceGroupId: parseInt(query.id as string),
+              },
+              include: {
+                departmentMembers: {
+                  include: {
+                    department: {
+                      include: {
+                        quotaDepartments: {
+                          include: {
+                            quota: true,
+                          },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        });
+      } catch (error) {
+        console.error("Failed to fetch user from Roblox:", error);
+        return { notFound: true };
+      }
+    }
+
+    const currentDate = new Date();
+    const lastReset = await prisma.activityReset.findFirst({
+      where: {
+        workspaceGroupId: parseInt(query.id as string),
+      },
+      orderBy: {
+        resetAt: "desc",
+      },
+    });
+
+    // Use last reset date, or November 30th 2024, whichever is more recent
+    const nov30 = new Date("2024-11-30T00:00:00Z");
+    const startDate = lastReset?.resetAt
+      ? lastReset.resetAt > nov30
+        ? lastReset.resetAt
+        : nov30
+      : nov30;
+
+    const roleQuotasWithInfo = userTakingAction.roles.flatMap((role) =>
+      role.quotaRoles.map((qr) => ({
+        ...qr.quota,
+        linkedVia: "role" as const,
+        linkedName: role.name,
+        linkedColor: role.color,
+      })),
+    );
+
+    const departmentQuotasWithInfo = userTakingAction.workspaceMemberships
+      .flatMap((wm) => wm.departmentMembers)
+      .flatMap((dm) =>
+        dm.department.quotaDepartments.map((qd) => ({
+          ...qd.quota,
+          linkedVia: "department" as const,
+          linkedName: dm.department.name,
+          linkedColor: dm.department.color,
+        })),
+      );
+
+    const quotaMap = new Map();
+    [...roleQuotasWithInfo, ...departmentQuotasWithInfo].forEach((quota) => {
+      if (!quotaMap.has(quota.id)) {
+        quotaMap.set(quota.id, quota);
+      }
+    });
+    let quotasArray = Array.from(quotaMap.values());
+    const quotaIds = quotasArray.map((q) => q.id);
+    const customQuotaCompletions =
+      quotaIds.length > 0
+        ? await (prisma as any).userQuotaCompletion.findMany({
+            where: {
+              quotaId: { in: quotaIds },
+              userId: BigInt(query.uid as string),
+              workspaceGroupId: parseInt(query.id as string),
+              archived: { not: true },
+              OR: [{ completedAt: null }, { completedAt: { gte: startDate } }],
+            },
+            include: {
+              completedByUser: {
+                select: {
+                  userid: true,
+                  username: true,
+                },
+              },
+            },
+          })
+        : [];
+
+    const quotas = quotasArray.map((quota: any) => {
+      const completion = customQuotaCompletions.find(
+        (c: any) => c.quotaId === quota.id,
+      );
+      if (quota.type === "custom" && completion) {
+        return {
+          ...quota,
+          completed: completion.completed || false,
+          completedAt: completion.completedAt,
+          completedBy: completion.completedBy
+            ? completion.completedBy.toString()
+            : null,
+          completedByUser: completion.completedByUser
+            ? {
+                userid: completion.completedByUser.userid.toString(),
+                username: completion.completedByUser.username,
+              }
+            : null,
+          completionNotes: completion.notes,
+        };
+      }
+      return quota;
+    });
+
+    const noticesConfig = await prisma.config.findFirst({
+      where: {
+        workspaceGroupId: parseInt(query.id as string),
+        key: "notices",
+      },
+    });
+
+    const notices = await prisma.inactivityNotice.findMany({
+      where: {
+        userId: BigInt(query?.uid as string),
+        workspaceGroupId: parseInt(query?.id as string),
+      },
+      orderBy: [{ startTime: "desc" }],
+    });
+
+    const noticeReviewerIds = [
+      ...new Set([
+        ...notices.filter((n) => n.reviewedByUserId).map((n) => n.reviewedByUserId!),
+        ...notices.filter((n) => n.revokedByUserId).map((n) => n.revokedByUserId!),
+      ]),
+    ];
+    const noticeReviewers = noticeReviewerIds.length
+      ? await prisma.user.findMany({
+          where: { userid: { in: noticeReviewerIds } },
+          select: { userid: true, username: true },
+        })
+      : [];
+    const noticeReviewerMap: Record<string, string> = {};
+    noticeReviewers.forEach((r) => {
+      noticeReviewerMap[r.userid.toString()] = r.username || "Unknown";
+    });
+    const noticesWithReviewer = notices.map((n) => ({
+      ...n,
+      reviewedByUsername: n.reviewedByUserId
+        ? (noticeReviewerMap[n.reviewedByUserId.toString()] ?? null)
+        : null,
+      revokedByUsername: n.revokedByUserId
+        ? (noticeReviewerMap[n.revokedByUserId.toString()] ?? null)
+        : null,
+    }));
+
+    const sessions = await prisma.activitySession.findMany({
+      where: {
+        userId: BigInt(query?.uid as string),
+        workspaceGroupId: parseInt(query.id as string),
+        startTime: {
+          gte: startDate,
+          lte: currentDate,
+        },
+        archived: { not: true },
+      },
+      include: {
+        user: {
+          select: {
+            picture: true,
+          },
+        },
+      },
+      orderBy: [{ active: "desc" }, { endTime: "desc" }, { startTime: "desc" }],
+    });
+
+    const adjustments = await prisma.activityAdjustment.findMany({
+      where: {
+        userId: BigInt(query?.uid as string),
+        workspaceGroupId: parseInt(query?.id as string),
+        createdAt: {
+          gte: startDate,
+          lte: currentDate,
+        },
+        archived: { not: true },
+      },
+      orderBy: { createdAt: "desc" },
+      include: {
+        actor: {
+          select: { userid: true, username: true },
+        },
+      },
+    });
+
+    let timeSpent = 0;
+    let totalIdleTime = 0;
+    if (sessions.length) {
+      const completedSessions = sessions.filter(
+        (session) => !session.active && session.endTime,
+      );
+      timeSpent = completedSessions.reduce((sum, session) => {
+        const totalTime =
+          (session.endTime?.getTime() ?? 0) - session.startTime.getTime();
+        const idleTime = session.idleTime ? Number(session.idleTime) : 0; // Already in minutes from Roblox
+        return sum + Math.max(0, totalTime - idleTime * 60000);
+      }, 0);
+      timeSpent = Math.round(timeSpent / 60000);
+      totalIdleTime = sessions.reduce((sum, session) => {
+        return sum + (session.idleTime ? Number(session.idleTime) : 0);
+      }, 0);
+    }
+    const netAdjustment = adjustments.reduce((sum, a) => sum + a.minutes, 0);
+    const displayTimeSpent = timeSpent + netAdjustment;
+
+    const startOfWeek = moment().startOf("week").toDate();
+    const endOfWeek = moment().endOf("week").toDate();
+
+    const weeklySessions = await prisma.activitySession.findMany({
+      where: {
+        userId: BigInt(query?.uid as string),
+        workspaceGroupId: parseInt(query.id as string),
+        startTime: {
+          lte: endOfWeek,
+          gte: startOfWeek,
+        },
+        archived: { not: true },
+      },
+      orderBy: {
+        startTime: "asc",
+      },
+    });
+
+    const days: { day: number; ms: number[] }[] = Array.from(
+      { length: 7 },
+      (_, i) => ({
+        day: i,
+        ms: [],
+      }),
+    );
+
+    weeklySessions.forEach((session) => {
+      const jsDay = session.startTime.getDay();
+      const chartDay = jsDay === 0 ? 6 : jsDay - 1;
+      let duration = 0;
+
+      if (session.active && !session.endTime) {
+        duration = Math.round(
+          (new Date().getTime() - session.startTime.getTime()) / 60000,
+        );
+      } else if (session.endTime) {
+        duration = Math.round(
+          (session.endTime.getTime() - session.startTime.getTime()) / 60000,
+        );
+      }
+
+      if (duration > 0) {
+        days.find((d) => d.day === chartDay)?.ms.push(duration);
+      }
+    });
+
+    const data: number[] = days.map((d) =>
+      d.ms.reduce((sum, val) => sum + val, 0),
+    );
+
+    const ubook = await prisma.userBook.findMany({
+      where: {
+        userId: BigInt(query?.uid as string),
+        workspaceGroupId: parseInt(query.id as string),
+      },
+      include: {
+        admin: {
+          select: {
+            userid: true,
+            username: true,
+          },
+        },
+      },
+      orderBy: {
+        createdAt: "desc",
+      },
+    });
+
+    const allSessionParticipations = await prisma.sessionUser.findMany({
+      where: {
+        userid: BigInt(query?.uid as string),
+        session: {
+          sessionType: {
+            workspaceGroupId: parseInt(query.id as string),
+          },
+          date: {
+            gte: startDate,
+            lte: currentDate,
+          },
+          archived: { not: true },
+        },
+        archived: { not: true },
+      },
+      include: {
+        session: {
+          select: {
+            id: true,
+            date: true,
+            sessionType: {
+              select: {
+                slots: true,
+                name: true,
+              },
+            },
+          },
+        },
+      },
+    });
+
+    const sessionsHosted = allSessionParticipations.filter((participation) => {
+      const slots = participation.session.sessionType.slots as any[];
+      const matchingSlot = slots.find((s: any) => s.id === participation.roleID);
+      return matchingSlot?.hostRole === "primary";
+    }).length;
+
+    const sessionsSecondaryHosted = allSessionParticipations.filter((participation) => {
+      const slots = participation.session.sessionType.slots as any[];
+      const matchingSlot = slots.find((s: any) => s.id === participation.roleID);
+      return matchingSlot?.hostRole === "secondary";
+    }).length;
+
+    const sessionsAttended = allSessionParticipations.filter((participation) => {
+      const slots = participation.session.sessionType.slots as any[];
+      const matchingSlot = slots.find((s: any) => s.id === participation.roleID);
+      return !matchingSlot?.hostRole;
+    }).length;
+
+    const allianceVisits = await prisma.allyVisit.count({
+      where: {
+        OR: [
+          { hostId: BigInt(query?.uid as string) },
+          { participants: { has: BigInt(query?.uid as string) } },
+        ],
+        time: {
+          gte: startDate,
+          lte: currentDate,
+        },
+      },
+    });
+
+    const recommendationSubmissions = await (prisma as any).recommendation.count({
+      where: {
+        workspaceGroupId: parseInt(query.id as string),
+        createdById: BigInt(query.uid as string),
+        createdAt: { gte: startDate, lte: currentDate },
+      },
+    });
+
+    const recommendationVotes = await (prisma as any).recommendationVote.count({
+      where: {
+        userId: BigInt(query.uid as string),
+        recommendation: { workspaceGroupId: parseInt(query.id as string) },
+        createdAt: { gte: startDate, lte: currentDate },
+      },
+    });
+
+    const user = await prisma.user.findUnique({
+      where: { userid: BigInt(query.uid as string) },
+      select: {
+        userid: true,
+        username: true,
+        registered: true,
+        birthdayDay: true,
+        birthdayMonth: true,
+        ranks: {
+          select: {
+            rankId: true,
+            workspaceGroupId: true,
+          },
+        },
+      },
+    });
+
+    const targetUserMembership = await prisma.workspaceMember.findUnique({
+      where: {
+        workspaceGroupId_userId: {
+          workspaceGroupId: parseInt(query.id as string),
+          userId: BigInt(query.uid as string),
+        },
+      },
+      select: {
+        joinDate: true,
+        lineManagerId: true,
+        timezone: true,
+        discordId: true,
+        email: true,
+        departmentMembers: {
+          select: {
+            department: {
+              select: {
+                id: true,
+                name: true,
+                color: true,
+              },
+            },
+          },
+        },
+      },
+    });
+
+    const availableDepartments = await prisma.department.findMany({
+      where: {
+        workspaceGroupId: parseInt(query.id as string),
+      },
+      select: {
+        id: true,
+        name: true,
+        color: true,
+      },
+      orderBy: {
+        name: "asc",
+      },
+    });
+
+    const memberRoles = await prisma.role.findMany({
+      where: {
+        workspaceGroupId: parseInt(query.id as string),
+        members: {
+          some: {
+            userid: BigInt(query.uid as string),
+          },
+        },
+      },
+      select: {
+        id: true,
+        name: true,
+        isOwnerRole: true,
+      },
+      orderBy: {
+        isOwnerRole: "desc",
+      },
+    });
+
+    let memberRoleName: string | null = null;
+    try {
+      if (memberRoles.length > 0) {
+        const workspaceGroupId = parseInt(query.id as string);
+        const roles = await getGroupRoles(workspaceGroupId);
+        const userRankRecord =
+          user?.ranks?.find(
+            (r: any) => Number(r.workspaceGroupId) === workspaceGroupId,
+          ) || user?.ranks?.[0];
+
+        if (userRankRecord) {
+          const storedValue = Number(userRankRecord.rankId);
+          if (storedValue > 255) {
+            const groupRole = roles.find((r: any) => r.id === storedValue);
+            if (groupRole?.name) {
+              memberRoleName = groupRole.name;
+            }
+          } else {
+            const groupRole = roles.find((r: any) => r.rank === storedValue);
+            if (groupRole?.name) {
+              memberRoleName = groupRole.name;
+            }
+          }
+        }
+      }
+    } catch (e) {
+      console.error("Error fetching member role name:", e);
+      memberRoleName = null;
+    }
+
+    let lineManager = null;
+    if (targetUserMembership?.lineManagerId) {
+      const manager = await prisma.user.findUnique({
+        where: { userid: targetUserMembership.lineManagerId },
+        select: {
+          userid: true,
+          username: true,
+          picture: true,
+        },
+      });
+      if (manager) {
+        lineManager = {
+          userid: manager.userid.toString(),
+          username: manager.username,
+          picture: getThumbnail(manager.userid),
+        };
+      }
+    }
+
+    const manageesRaw = await prisma.workspaceMember.findMany({
+      where: {
+        workspaceGroupId: parseInt(query.id as string),
+        lineManagerId: BigInt(query.uid as string),
+      },
+      select: {
+        user: {
+          select: {
+            userid: true,
+            username: true,
+            picture: true,
+          },
+        },
+      },
+      orderBy: {
+        user: { username: "asc" },
+      },
+    });
+
+    const manages = manageesRaw.map((m) => ({
+      userid: m.user.userid.toString(),
+      username: m.user.username,
+      picture: getThumbnail(m.user.userid),
+    }));
+
+    const allianceMemberships = await prisma.ally.findMany({
+      where: {
+        workspaceGroupId: parseInt(query.id as string),
+        reps: { some: { userid: BigInt(query.uid as string) } },
+      },
+      select: {
+        id: true,
+        name: true,
+        icon: true,
+        groupId: true,
+      },
+    });
+
+    const allMembersRaw = await prisma.user.findMany({
+      where: {
+        workspaceMemberships: {
+          some: {
+            workspaceGroupId: parseInt(query.id as string),
+          },
+        },
+      },
+      select: {
+        userid: true,
+        username: true,
+        picture: true,
+      },
+      orderBy: {
+        username: "asc",
+      },
+    });
+
+    const allMembers = allMembersRaw.map((member) => ({
+      userid: member.userid.toString(),
+      username: member.username,
+      picture: getThumbnail(member.userid),
+    }));
+
+    if (!user) {
+      return { notFound: true };
+    }
+
+    return {
+      props: {
+        notices: JSON.parse(
+          JSON.stringify(noticesWithReviewer, (_k, v) =>
+            typeof v === "bigint" ? v.toString() : v,
+          ),
+        ),
+        timeSpent: displayTimeSpent,
+        totalIdleTime: Math.round(totalIdleTime),
+        timesPlayed: sessions.length,
+        data,
+        sessions: JSON.parse(
+          JSON.stringify(sessions, (_k, v) =>
+            typeof v === "bigint" ? v.toString() : v,
+          ),
+        ),
+        adjustments: JSON.parse(
+          JSON.stringify(adjustments, (_k, v) =>
+            typeof v === "bigint" ? v.toString() : v,
+          ),
+        ),
+        info: {
+          username: await getUsername(Number(query?.uid as string)),
+          displayName: await getDisplayName(Number(query?.uid as string)),
+          avatar: getThumbnail(Number(query?.uid as string)),
+        },
+        isUser: (req as any)?.session?.userid === Number(query?.uid as string),
+        isAdmin,
+        sessionsHosted: sessionsHosted,
+        sessionsSecondaryHosted: sessionsSecondaryHosted,
+        sessionsAttended: sessionsAttended,
+        allianceVisits: allianceVisits,
+        recommendationSubmissions: recommendationSubmissions,
+        recommendationVotes: recommendationVotes,
+        quotas: JSON.parse(
+          JSON.stringify(quotas, (_k, v) =>
+            typeof v === "bigint" ? v.toString() : v,
+          ),
+        ),
+        userBook: JSON.parse(
+          JSON.stringify(ubook, (_k, v) =>
+            typeof v === "bigint" ? v.toString() : v,
+          ),
+        ),
+        user: {
+          ...JSON.parse(
+            JSON.stringify(user, (_k, v) =>
+              typeof v === "bigint" ? v.toString() : v,
+            ),
+          ),
+          userid: user.userid.toString(),
+          joinDate: targetUserMembership?.joinDate
+            ? targetUserMembership.joinDate.toISOString()
+            : null,
+        },
+        memberRoleName,
+        workspaceMember: targetUserMembership
+          ? {
+              departments: targetUserMembership.departmentMembers.map((dm) => ({
+                id: dm.department.id,
+                name: dm.department.name,
+                color: dm.department.color,
+              })),
+              lineManagerId:
+                targetUserMembership.lineManagerId?.toString() || null,
+              timezone: targetUserMembership.timezone,
+              discordId: targetUserMembership.discordId,
+              email: targetUserMembership.email,
+            }
+          : null,
+        availableDepartments,
+        lineManager,
+        manages,
+        allianceMemberships,
+        allMembers,
+        canManageMembers: hasManageMembersPermission,
+        canManageNotices: hasManageNoticesPermission,
+        canApproveNotices: hasApproveNoticesPermission,
+        canRecordNotices: hasRecordNoticesPermission,
+        canAdjustActivity: hasActivityAdjustmentsPermission,
+        canSignoffQuotas,
+        logbookEnabled: hasAnyLogbookPermission,
+        logbookPermissions,
+      },
+    };
+  },
+);
+
+type pageProps = {
+  notices: any;
+  timeSpent: number;
+  totalIdleTime: number;
+  timesPlayed: number;
+  data: number[];
+  sessions: (ActivitySession & {
+    user: {
+      picture: string | null;
+    };
+  })[];
+  adjustments: any[];
+  info: {
+    username: string;
+    displayName: string;
+    avatar: string;
+  };
+  memberRoleName: string | null;
+  userBook: any;
+  quotas: Quota[];
+  sessionsHosted: number;
+  sessionsSecondaryHosted: number;
+  sessionsAttended: number;
+  allianceVisits: number;
+  recommendationSubmissions: number;
+  recommendationVotes: number;
+  isUser: boolean;
+  isAdmin: boolean;
+  user: {
+    userid: string;
+    username: string;
+    displayname: string;
+    registered: boolean;
+    birthdayDay: number;
+    birthdayMonth: number;
+    joinDate: string | null;
+  };
+  workspaceMember: {
+    departments: Array<{
+      id: string;
+      name: string;
+      color: string | null;
+    }>;
+    lineManagerId: string | null;
+    timezone: string | null;
+    discordId: string | null;
+    email: string | null;
+  } | null;
+  availableDepartments: Array<{
+    id: string;
+    name: string;
+    color: string | null;
+  }>;
+  lineManager: {
+    userid: string;
+    username: string;
+    picture: string;
+  } | null;
+  manages: Array<{
+    userid: string;
+    username: string;
+    picture: string;
+  }>;
+  allianceMemberships: Array<{
+    id: string;
+    name: string;
+    icon: string;
+    groupId: string;
+  }>;
+  allMembers: Array<{
+    userid: string;
+    username: string;
+    picture: string;
+  }>;
+  canManageMembers: boolean;
+  canManageNotices: boolean;
+  canApproveNotices: boolean;
+  canRecordNotices: boolean;
+  canAdjustActivity: boolean;
+  canSignoffQuotas: boolean;
+  logbookEnabled: boolean;
+  logbookPermissions: {
+    view: boolean;
+    rank: boolean;
+    note: boolean;
+    warning: boolean;
+    promotion: boolean;
+    demotion: boolean;
+    termination: boolean;
+    resignation: boolean;
+    redact: boolean;
+  };
+};
+const Profile: pageWithLayout<pageProps> = ({
+  notices,
+  timeSpent,
+  totalIdleTime,
+  timesPlayed,
+  data,
+  sessions,
+  adjustments,
+  userBook: initialUserBook,
+  isUser,
+  info,
+  memberRoleName,
+  sessionsHosted,
+  sessionsSecondaryHosted,
+  sessionsAttended,
+  allianceVisits,
+  recommendationSubmissions,
+  recommendationVotes,
+  quotas,
+  user,
+  isAdmin,
+  workspaceMember,
+  availableDepartments,
+  lineManager,
+  manages,
+  allianceMemberships,
+  allMembers,
+  canManageMembers,
+  canManageNotices,
+  canApproveNotices,
+  canRecordNotices,
+  canAdjustActivity,
+  canSignoffQuotas,
+  logbookEnabled,
+  logbookPermissions,
+}) => {
+  const [login, setLogin] = useRecoilState(loginState);
+  const [userBook, setUserBook] = useState(initialUserBook);
+  const [selectedWeek, setSelectedWeek] = useState(0);
+  const [currentTime, setCurrentTime] = useState(new Date());
+  const [historicalData, setHistoricalData] = useState<any>(null);
+  const [loadingHistory, setLoadingHistory] = useState(false);
+  const [availableHistory, setAvailableHistory] = useState<any[]>([]);
+  const currentData = {
+    timeSpent,
+    timesPlayed,
+    data,
+    quotas,
+    sessionsHosted,
+    sessionsSecondaryHosted,
+    sessionsAttended,
+    allianceVisits,
+    recommendationSubmissions,
+    recommendationVotes,
+    sessions,
+    adjustments,
+    messages: sessions.reduce(
+      (acc, session) => acc + Number(session.messages || 0),
+      0,
+    ),
+    idleTime: Math.round(
+      sessions.reduce((acc, session) => acc + Number(session.idleTime || 0), 0),
+    ),
+  };
+
+  const router = useRouter();
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setCurrentTime(new Date());
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    async function fetchAvailableHistory() {
+      try {
+        const response = await axios.get(
+          `/api/workspace/${router.query.id}/activity/history/${router.query.uid}`,
+        );
+        if (response.data.success && response.data.data.history) {
+          const validHistory = response.data.data.history.filter((h: any) => {
+            const hasActivity =
+              h.activity.minutes > 0 ||
+              h.activity.messages > 0 ||
+              h.activity.sessionsHosted > 0 ||
+              h.activity.sessionsAttended > 0;
+
+            const hasQuotas =
+              h.activity.quotaProgress &&
+              Object.keys(h.activity.quotaProgress).length > 0;
+
+            return hasActivity || hasQuotas;
+          });
+          setAvailableHistory(validHistory);
+        } else {
+          setAvailableHistory([]);
+        }
+      } catch (error) {
+        setAvailableHistory([]);
+      }
+    }
+
+    if (router.query.id && router.query.uid) {
+      fetchAvailableHistory();
+    }
+  }, [router.query.id, router.query.uid]);
+
+  useEffect(() => {
+    async function fetchHistoricalData() {
+      if (selectedWeek === 0) {
+        setHistoricalData(null);
+        return;
+      }
+
+      if (selectedWeek > availableHistory.length) {
+        return;
+      }
+
+      setLoadingHistory(true);
+      try {
+        const historyPeriod = availableHistory[selectedWeek - 1];
+        if (historyPeriod) {
+          const response = await axios.get(
+            `/api/workspace/${router.query.id}/activity/history/${router.query.uid}?periodEnd=${historyPeriod.period.end}`,
+          );
+          if (response.data.success) {
+            setHistoricalData(response.data.data);
+          }
+        }
+      } catch (error) {
+        console.error("Error fetching historical data:", error);
+      } finally {
+        setLoadingHistory(false);
+      }
+    }
+
+    fetchHistoricalData();
+  }, [selectedWeek, availableHistory, router.query.id, router.query.uid]);
+
+  const getCurrentWeekLabel = () => {
+    if (selectedWeek === 0) return "Current Period";
+    if (selectedWeek === 1) return "Last Period";
+    return `${selectedWeek} Periods Ago`;
+  };
+
+  const canGoBack = selectedWeek < availableHistory.length;
+  const canGoForward = selectedWeek > 0;
+
+  const goToPreviousWeek = () => {
+    if (canGoBack) {
+      setSelectedWeek(selectedWeek + 1);
+    }
+  };
+
+  const goToNextWeek = () => {
+    if (canGoForward) {
+      setSelectedWeek(selectedWeek - 1);
+    }
+  };
+
+  const displayData =
+    selectedWeek === 0
+      ? currentData
+      : historicalData
+        ? {
+            timeSpent: historicalData.activity.minutes,
+            timesPlayed:
+              historicalData.activity.totalSessions ||
+              historicalData.activity.sessionsHosted +
+                historicalData.activity.sessionsAttended,
+            data: historicalData.chartData || [0, 0, 0, 0, 0, 0, 0],
+            quotas: historicalData.activity.quotaProgress
+              ? Object.entries(historicalData.activity.quotaProgress).map(
+                  ([quotaId, qp]: [string, any]) => ({
+                    id: quotaId,
+                    name: qp.quotaName || qp.name || "",
+                    type: qp.quotaType || qp.type || "",
+                    value: qp.targetMinutes || qp.requirement || 0,
+                    workspaceGroupId: BigInt(router.query.id as string),
+                    description: null,
+                    sessionType: null,
+                    completionType: qp.completionType || null,
+                    sessionRole: null,
+                    currentValue: qp.currentMinutes || qp.value || 0,
+                    percentage: qp.percentage || 0,
+                    completed: qp.completed || false,
+                    completedAt: qp.completedAt ? new Date(qp.completedAt) : null,
+                    completedByUser: qp.completedByUsername
+                      ? { username: qp.completedByUsername }
+                      : null,
+                    linkedVia: qp.linkedVia || null,
+                    linkedName: qp.linkedName || null,
+                    linkedColor: qp.linkedColor || null,
+                  }),
+                )
+              : [],
+            sessionsHosted: historicalData.activity.sessionsHosted,
+            sessionsSecondaryHosted: historicalData.activity.sessionsSecondaryHosted || 0,
+            sessionsAttended: historicalData.activity.sessionsAttended,
+            allianceVisits: historicalData.activity.allianceVisits || 0,
+            recommendationSubmissions: 0,
+            recommendationVotes: 0,
+            sessions: historicalData.sessions || [],
+            adjustments: historicalData.adjustments || [],
+            messages: historicalData.activity.messages || 0,
+            idleTime: historicalData.activity.idleTime || 0,
+          }
+        : currentData;
+
+  const refetchUserBook = async () => {};
+
+  const BG_COLORS = [
+    "bg-amber-200",
+    "bg-red-300",
+    "bg-lime-200",
+    "bg-emerald-300",
+    "bg-rose-200",
+    "bg-green-100",
+    "bg-teal-200",
+    "bg-yellow-200",
+    "bg-red-100",
+    "bg-green-300",
+    "bg-lime-300",
+    "bg-emerald-200",
+    "bg-rose-300",
+    "bg-amber-300",
+    "bg-red-200",
+    "bg-green-200",
+  ];
+
+  function getRandomBg(userid: string, username?: string) {
+    const key = `${userid ?? ""}:${username ?? ""}`;
+    let hash = 5381;
+    for (let i = 0; i < key.length; i++) {
+      hash = ((hash << 5) - hash) ^ key.charCodeAt(i);
+    }
+    const index = (hash >>> 0) % BG_COLORS.length;
+    return BG_COLORS[index];
+  }
+
+  return (
+    <div className="min-h-screen bg-zinc-50 dark:bg-zinc-900">
+      <div className="pagePadding">
+        <Toaster position="bottom-center" />
+        <div>
+          <div className="bg-white dark:bg-zinc-800 rounded-xl p-4 sm:p-6 shadow-sm mb-6">
+            <div className="flex items-start gap-4">
+              <div className="relative flex-shrink-0">
+                <div
+                  className={`rounded-xl h-16 w-16 sm:h-20 sm:w-20 flex items-center justify-center ${getRandomBg(
+                    user.userid,
+                  )}`}
+                >
+                  <img
+                    src={info.avatar}
+                    className="rounded-xl h-16 w-16 sm:h-20 sm:w-20 object-cover border-2 border-white"
+                    alt={`${info.displayName}'s avatar`}
+                    style={{ background: "transparent" }}
+                  />
+                </div>
+                <div className="absolute -bottom-1 -right-1 w-5 h-5 sm:w-6 sm:h-6 bg-primary rounded-lg flex items-center justify-center">
+                  <IconUserCircle className="w-3 h-3 sm:w-4 sm:h-4 text-white" />
+                </div>
+              </div>
+              <div className="flex-1 w-full flex flex-row items-start sm:items-center justify-between gap-3 sm:gap-4">
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <h1 className="text-xl sm:text-2xl font-medium text-zinc-900 dark:text-white truncate">
+                      {info.displayName}
+                    </h1>
+                    {(() => {
+                      const now = new Date();
+                      const approvedNotices = notices.filter(
+                        (notice: any) =>
+                          notice.approved === true &&
+                          notice.reviewed === true &&
+                          notice.revoked === false,
+                      );
+                      const activeNotice = approvedNotices.find(
+                        (notice: any) =>
+                          new Date(notice.startTime) <= now &&
+                          new Date(notice.endTime) >= now,
+                      );
+                      if (activeNotice) {
+                        return (
+                          <div
+                            className="flex-shrink-0"
+                          >
+                            <IconBeach className="w-5 h-5 text-amber-500" />
+                          </div>
+                        );
+                      }
+                      const upcomingNotice = approvedNotices.find(
+                        (notice: any) => new Date(notice.startTime) > now,
+                      );
+                      if (upcomingNotice) {
+                        return (
+                          <div
+                            className="flex-shrink-0"
+                          >
+                            <IconBeach className="w-5 h-5 text-emerald-500" />
+                          </div>
+                        );
+                      }
+                      const pastNotice = approvedNotices.find(
+                        (notice: any) => new Date(notice.endTime) < now,
+                      );
+                      if (pastNotice) {
+                        return (
+                          <div
+                            className="flex-shrink-0"
+                          >
+                            <IconBeach className="w-5 h-5 text-zinc-400" />
+                          </div>
+                        );
+                      }
+                      return null;
+                    })()}
+                  </div>
+                  <p className="text-sm text-zinc-500 dark:text-zinc-400 truncate">
+                    @{info.username}
+                  </p>
+                  {memberRoleName && (
+                    <p className="text-xs font-medium text-zinc-500 dark:text-zinc-400 mt-0.5 truncate">
+                      {memberRoleName}
+                    </p>
+                  )}
+                </div>
+                <div className="flex flex-col sm:flex-row items-end sm:items-center gap-2 sm:gap-3 flex-shrink-0">
+                  {workspaceMember &&
+                    workspaceMember.timezone &&
+                    (() => {
+                      const userHour = new Date().toLocaleString("en-US", {
+                        timeZone:
+                          areaBasedToIANATimezone(workspaceMember.timezone) ||
+                          "UTC",
+                        hour: "numeric",
+                        hour12: false,
+                      });
+                      const hour = parseInt(userHour);
+                      const isDay = hour >= 6 && hour < 18;
+
+                      return (
+                        <div className="inline-flex items-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-1.5 sm:py-2 rounded-full bg-zinc-900 text-white shadow-sm border border-primary/40">
+                          {isDay ? (
+                            <IconSun className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-amber-300" />
+                          ) : (
+                            <IconMoon className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-zinc-100" />
+                          )}
+                          <span className="text-xs sm:text-sm font-semibold tabular-nums">
+                            {currentTime.toLocaleTimeString("en-US", {
+                              timeZone:
+                                areaBasedToIANATimezone(
+                                  workspaceMember.timezone,
+                                ) || "UTC",
+                              hour: "2-digit",
+                              minute: "2-digit",
+                              hour12: true,
+                            })}
+                          </span>
+                        </div>
+                      );
+                    })()}
+                  <a
+                    href={`https://www.roblox.com/users/${user.userid}/profile`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-1.5 sm:gap-2 px-2.5 sm:px-3 py-1.5 rounded-full border border-zinc-300 bg-white text-xs font-medium text-zinc-900 hover:bg-zinc-50 dark:border-zinc-600 dark:bg-zinc-900 dark:text-white dark:hover:bg-zinc-800 whitespace-nowrap"
+                  >
+                    <IconExternalLink className="w-3.5 h-3.5 sm:w-4 sm:h-4 dark:text-white" />
+                    <span className="hidden sm:inline dark:text-white">View on Roblox</span>
+                    <span className="sm:hidden dark:text-white">Roblox</span>
+                  </a>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-white dark:bg-zinc-800 rounded-xl shadow-sm overflow-hidden">
+            <Tab.Group>
+              <Tab.List className="flex border-b border-zinc-200 dark:border-zinc-700 mx-2 sm:mx-4 mt-3 mb-2 overflow-x-auto scrollbar-hide">
+                <Tab
+                  className={({ selected }) =>
+                    `flex items-center gap-1 sm:gap-2 px-2 sm:px-4 py-2.5 text-xs sm:text-sm font-medium transition-all border-b-2 -mb-px whitespace-nowrap flex-shrink-0 ${
+                      selected
+                        ? "border-primary text-primary"
+                        : "border-transparent text-zinc-500 dark:text-zinc-400 opacity-60 hover:opacity-100 hover:text-zinc-700 dark:hover:text-zinc-300"
+                    }`
+                  }
+                >
+                  <IconClipboard className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
+                  <span>Details</span>
+                </Tab>
+                <Tab
+                  className={({ selected }) =>
+                    `flex items-center gap-1 sm:gap-2 px-2 sm:px-4 py-2.5 text-xs sm:text-sm font-medium transition-all border-b-2 -mb-px whitespace-nowrap flex-shrink-0 ${
+                      selected
+                        ? "border-primary text-primary"
+                        : "border-transparent text-zinc-500 dark:text-zinc-400 opacity-60 hover:opacity-100 hover:text-zinc-700 dark:hover:text-zinc-300"
+                    }`
+                  }
+                >
+                  <IconHistory className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
+                  <span>Activity</span>
+                </Tab>
+                {logbookEnabled && (
+                  <Tab
+                    className={({ selected }) =>
+                      `flex items-center gap-1 sm:gap-2 px-2 sm:px-4 py-2.5 text-xs sm:text-sm font-medium transition-all border-b-2 -mb-px whitespace-nowrap flex-shrink-0 ${
+                        selected
+                          ? "border-primary text-primary"
+                          : "border-transparent text-zinc-500 dark:text-zinc-400 opacity-60 hover:opacity-100 hover:text-zinc-700 dark:hover:text-zinc-300"
+                      }`
+                    }
+                  >
+                    <IconBook className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
+                    <span>Logbook</span>
+                  </Tab>
+                )}
+                <Tab
+                  className={({ selected }) =>
+                    `flex items-center gap-1 sm:gap-2 px-2 sm:px-4 py-2.5 text-xs sm:text-sm font-medium transition-all border-b-2 -mb-px whitespace-nowrap flex-shrink-0 ${
+                      selected
+                        ? "border-primary text-primary"
+                        : "border-transparent text-zinc-500 dark:text-zinc-400 opacity-60 hover:opacity-100 hover:text-zinc-700 dark:hover:text-zinc-300"
+                    }`
+                  }
+                >
+                  <IconCalendar className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
+                  <span>Notices</span>
+                </Tab>
+              </Tab.List>
+              <Tab.Panels className="p-3 sm:p-4 bg-white dark:bg-zinc-800 rounded-b-xl">
+                <Tab.Panel>
+                  <InformationTab
+                    key={user.userid}
+                    user={{
+                      userid: String(user.userid),
+                      username: user.username,
+                      displayname: info.displayName,
+                      registered: user.registered,
+                      birthdayDay: user.birthdayDay,
+                      birthdayMonth: user.birthdayMonth,
+                      joinDate: user.joinDate,
+                    }}
+                    workspaceMember={workspaceMember || undefined}
+                    availableDepartments={availableDepartments}
+                    lineManager={lineManager}
+                    manages={manages}
+                    allMembers={allMembers}
+                    isUser={isUser}
+                    isAdmin={isAdmin}
+                    canEditMembers={canManageMembers}
+                  />
+                </Tab.Panel>
+                <Tab.Panel>
+                  <Activity
+                    timeSpent={displayData.timeSpent}
+                    timesPlayed={displayData.timesPlayed}
+                    data={displayData.data}
+                    quotas={displayData.quotas}
+                    sessionsHosted={displayData.sessionsHosted}
+                    sessionsSecondaryHosted={displayData.sessionsSecondaryHosted}
+                    sessionsAttended={displayData.sessionsAttended}
+                    allianceVisits={displayData.allianceVisits}
+                    recommendationSubmissions={displayData.recommendationSubmissions}
+                    recommendationVotes={displayData.recommendationVotes}
+                    avatar={info.avatar}
+                    sessions={displayData.sessions}
+                    adjustments={displayData.adjustments}
+                    notices={notices}
+                    messages={displayData.messages}
+                    idleTime={displayData.idleTime}
+                    isHistorical={selectedWeek > 0}
+                    historicalPeriod={
+                      selectedWeek > 0 && historicalData
+                        ? {
+                            start: historicalData.period?.start,
+                            end: historicalData.period?.end,
+                          }
+                        : null
+                    }
+                    loadingHistory={loadingHistory}
+                    selectedWeek={selectedWeek}
+                    availableHistory={availableHistory}
+                    getCurrentWeekLabel={getCurrentWeekLabel}
+                    canGoBack={canGoBack}
+                    canGoForward={canGoForward}
+                    goToPreviousWeek={goToPreviousWeek}
+                    goToNextWeek={goToNextWeek}
+                    canAdjustActivity={canAdjustActivity}
+                    canSignoffQuotas={canSignoffQuotas}
+                    targetUserId={user.userid}
+                    isViewingOwnProfile={isUser}
+                  />
+                </Tab.Panel>
+                {logbookEnabled && (
+                  <Tab.Panel>
+                    <Book
+                      userBook={userBook}
+                      onRefetch={refetchUserBook}
+                      logbookPermissions={logbookPermissions}
+                    />
+                  </Tab.Panel>
+                )}
+                <Tab.Panel>
+                  <Notices
+                    notices={notices}
+                    canManageNotices={canManageNotices}
+                    canApproveNotices={canApproveNotices}
+                    canRecordNotices={canRecordNotices}
+                    userId={user.userid}
+                  />
+                </Tab.Panel>
+              </Tab.Panels>
+            </Tab.Group>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+Profile.layout = workspace;
+
+export default Profile;

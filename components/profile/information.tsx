@@ -1,0 +1,847 @@
+import React, { useEffect, useState, Fragment } from "react";
+import {
+  IconUser,
+  IconId,
+  IconBriefcase,
+  IconUserCheck,
+  IconUsers,
+  IconMail,
+  IconShield,
+  IconClock,
+  IconSun,
+  IconMoon,
+  IconCalendar,
+  IconCheck,
+  IconX,
+  IconPencil,
+  IconChevronDown,
+  IconRefresh,
+  IconCopy,
+} from "@tabler/icons-react";
+import axios from "axios";
+import { useRouter } from "next/router";
+import { Listbox, Transition, Combobox } from "@headlessui/react";
+import toast from "react-hot-toast";
+import Tooltip from "@/components/tooltip";
+import {
+  getTimezoneOptions,
+  parseTimezoneOffset,
+  convertLegacyTimezone,
+  detectUserTimezone,
+  formatTimezoneDisplay,
+} from "@/utils/timezoneUtils";
+
+const BG_COLORS = [
+  "bg-amber-200",
+  "bg-red-300",
+  "bg-lime-200",
+  "bg-emerald-300",
+  "bg-rose-200",
+  "bg-green-100",
+  "bg-teal-200",
+  "bg-yellow-200",
+  "bg-red-100",
+  "bg-green-300",
+  "bg-lime-300",
+  "bg-emerald-200",
+  "bg-rose-300",
+  "bg-amber-300",
+  "bg-red-200",
+  "bg-green-200",
+];
+
+
+function getRandomBg(userid: string, username?: string) {
+  const key = `${userid ?? ""}:${username ?? ""}`;
+  let hash = 5381;
+  for (let i = 0; i < key.length; i++) {
+    hash = ((hash << 5) - hash) ^ key.charCodeAt(i);
+  }
+  const index = (hash >>> 0) % BG_COLORS.length;
+  return BG_COLORS[index];
+}
+
+type InformationTabProps = {
+  user: {
+    userid: string;
+    username: string;
+    displayname: string;
+    rank?: string | number;
+    registered: boolean;
+    birthdayDay?: number | null;
+    birthdayMonth?: number | null;
+    joinDate?: string | null;
+  };
+  workspaceMember?: {
+    departments?: Array<{
+      id: string;
+      name: string;
+      color: string | null;
+    }>;
+    lineManagerId?: string | null;
+    timezone?: string | null;
+    discordId?: string | null;
+    email?: string | null;
+  };
+  lineManager?: {
+    userid: string;
+    username: string;
+    picture: string;
+  } | null;
+  manages?: Array<{
+    userid: string;
+    username: string;
+    picture: string;
+  }>;
+  allMembers?: Array<{
+    userid: string;
+    username: string;
+    picture: string;
+  }>;
+  availableDepartments?: Array<{
+    id: string;
+    name: string;
+    color: string | null;
+  }>;
+  isUser?: boolean;
+  isAdmin?: boolean;
+  canEditMembers?: boolean;
+};
+
+const monthNames = [
+  "",
+  "January",
+  "February",
+  "March",
+  "April",
+  "May",
+  "June",
+  "July",
+  "August",
+  "September",
+  "October",
+  "November",
+  "December",
+];
+
+const timezoneOptions = getTimezoneOptions();
+
+export function InformationTab({
+  user,
+  workspaceMember,
+  lineManager: initialLineManager,
+  manages = [],
+  allMembers = [],
+  availableDepartments = [],
+  isUser,
+  isAdmin,
+  canEditMembers,
+}: InformationTabProps) {
+  const router = useRouter();
+  const [editing, setEditing] = useState(false);
+  const [selectedDepartments, setSelectedDepartments] = useState(workspaceMember?.departments || []);
+  const [selectedManager, setSelectedManager] = useState(initialLineManager);
+  
+  // Handle legacy timezone conversion
+  const initializeTimezone = () => {
+    const tz = workspaceMember?.timezone || "";
+    if (!tz) return "";
+    // Check if it looks like a legacy location-based timezone (contains /)
+    if (tz.includes("/")) {
+      return convertLegacyTimezone(tz);
+    }
+    return tz;
+  };
+  
+  const [selectedTimezone, setSelectedTimezone] = useState(initializeTimezone());
+  const [birthdayDay, setBirthdayDay] = useState(user.birthdayDay || "");
+  const [birthdayMonth, setBirthdayMonth] = useState(user.birthdayMonth || "");
+  const [discordId, setDiscordId] = useState(workspaceMember?.discordId || "");
+  const [email, setEmail] = useState(workspaceMember?.email || "");
+  const [loading, setLoading] = useState(false);
+  const [pullingDiscord, setPullingDiscord] = useState(false);
+  const [localTime, setLocalTime] = useState("");
+  const [isNight, setIsNight] = useState(false);
+  const [managerQuery, setManagerQuery] = useState("");
+
+  const workspaceId = router.query.id as string;
+  const canEdit = isUser || isAdmin || canEditMembers;
+
+  const filteredManagers = managerQuery === ""
+    ? allMembers.filter((m) => m.userid !== user.userid).slice(0, 5)
+    : allMembers
+        .filter((m) => 
+          m.userid !== user.userid &&
+          m.username.toLowerCase().includes(managerQuery.toLowerCase())
+        )
+        .slice(0, 5);
+
+  useEffect(() => {
+    const updateTime = () => {
+      const tzLabel = workspaceMember?.timezone || "UTC±00:00 (GMT)";
+      const offset = parseTimezoneOffset(tzLabel);
+      
+      // Get current UTC time
+      const now = new Date();
+      const utcMs = now.getTime() + now.getTimezoneOffset() * 60000;
+      
+      // Apply offset to get local time in the selected timezone
+      const tzTime = new Date(utcMs + offset * 3600000);
+      
+      // Format time as h:mm A
+      let hours = tzTime.getHours();
+      const minutes = tzTime.getMinutes();
+      const ampm = hours >= 12 ? 'PM' : 'AM';
+      hours = hours % 12;
+      hours = hours ? hours : 12; // 0 should be 12
+      const minutesStr = minutes < 10 ? '0' + minutes : minutes;
+      
+      setLocalTime(`${hours}:${minutesStr} ${ampm}`);
+      setIsNight(hours < 6 || hours >= 18);
+    };
+
+    updateTime();
+    const interval = setInterval(updateTime, 30000);
+    return () => clearInterval(interval);
+  }, [workspaceMember?.timezone]);
+
+  const handleSave = async () => {
+    if (!workspaceId) return;
+    setLoading(true);
+    try {
+      await axios.patch(
+        `/api/workspace/${workspaceId}/profile/${user.userid}/member-info`,
+        {
+          departmentIds: selectedDepartments.map(d => d.id),
+          lineManagerId: selectedManager?.userid || null,
+          timezone: selectedTimezone || null,
+          birthdayDay: birthdayDay ? parseInt(birthdayDay as string) : null,
+          birthdayMonth: birthdayMonth ? parseInt(birthdayMonth as string) : null,
+          discordId: discordId || null,
+          email: email || null,
+        }
+      );
+      
+      toast.success("Information updated!");
+      setEditing(false);
+      router.replace(router.asPath);
+    } catch (e) {
+      toast.error("Failed to update information");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleCancel = () => {
+    setSelectedDepartments(workspaceMember?.departments || []);
+    setSelectedManager(initialLineManager);
+    const tz = workspaceMember?.timezone || "";
+    const convertedTz = tz.includes("/") ? convertLegacyTimezone(tz) : tz;
+    setSelectedTimezone(convertedTz);
+    setBirthdayDay(user.birthdayDay || "");
+    setBirthdayMonth(user.birthdayMonth || "");
+    setDiscordId(workspaceMember?.discordId || "");
+    setEmail(workspaceMember?.email || "");
+    setEditing(false);
+  };
+
+  const pullDiscordFromBloxlink = async () => {
+    setPullingDiscord(true);
+    try {
+      const res = await axios.post(
+        `/api/workspace/${workspaceId}/settings/bloxlink/lookup`,
+        { robloxUserId: user.userid }
+      );
+      if (res.data.success && res.data.discordId) {
+        setDiscordId(res.data.discordId);
+        toast.success("Discord ID pulled from Bloxlink!");
+      } else {
+        toast.error(res.data.error || "No linked Discord account found");
+      }
+    } catch (e: any) {
+      toast.error(e.response?.data?.error || "Failed to pull from Bloxlink");
+    } finally {
+      setPullingDiscord(false);
+    }
+  };
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 sm:gap-0">
+        <h3 className="text-base sm:text-lg font-semibold text-zinc-900 dark:text-white">
+          Information
+        </h3>
+        {canEdit && !editing && (
+          <button
+            onClick={() => setEditing(true)}
+            className="inline-flex items-center gap-1.5 sm:gap-2 px-2.5 sm:px-3 py-1.5 text-xs sm:text-sm font-medium rounded-lg text-zinc-700 dark:text-zinc-300 border border-zinc-300 dark:border-zinc-600 hover:bg-zinc-50 dark:hover:bg-zinc-800 transition"
+          >
+            <IconPencil className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
+            Edit
+          </button>
+        )}
+        {editing && (
+          <div className="flex gap-2 w-full sm:w-auto">
+            <button
+              onClick={handleCancel}
+              className="inline-flex items-center gap-1.5 sm:gap-2 px-2.5 sm:px-3 py-1.5 text-xs sm:text-sm font-medium rounded-lg text-zinc-700 dark:text-zinc-300 border border-zinc-300 dark:border-zinc-600 hover:bg-zinc-50 dark:hover:bg-zinc-800 transition flex-1 sm:flex-initial"
+            >
+              <IconX className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
+              Cancel
+            </button>
+            <button
+              onClick={handleSave}
+              disabled={loading}
+              className="inline-flex items-center gap-1.5 sm:gap-2 px-2.5 sm:px-3 py-1.5 text-xs sm:text-sm font-medium rounded-lg text-white bg-primary hover:bg-primary/90 transition flex-1 sm:flex-initial"
+            >
+              <IconCheck className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
+              Save
+            </button>
+          </div>
+        )}
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div className="space-y-3">
+          <div className="bg-zinc-50 dark:bg-zinc-800/50 rounded-lg p-4">
+            <div className="flex items-center gap-3 mb-2">
+              <div className="p-2 bg-primary/10 rounded-lg">
+                <IconUser className="w-5 h-5 text-primary" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-xs font-medium text-zinc-500 dark:text-zinc-400">
+                  Username
+                </p>
+                <div className="flex items-center gap-1">
+                  <p className="text-sm font-semibold text-zinc-900 dark:text-white">
+                    {user.username}
+                  </p>
+                  <Tooltip orientation="top" tooltipText="Copy username">
+                    <button
+                      type="button"
+                      className="p-1 rounded hover:bg-zinc-200 dark:hover:bg-zinc-700 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 transition-colors flex-shrink-0"
+                      onClick={() => {
+                        navigator.clipboard.writeText(user.username);
+                        toast.success("Copied to clipboard");
+                      }}
+                    >
+                      <IconCopy className="w-3.5 h-3.5" />
+                    </button>
+                  </Tooltip>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div className="bg-zinc-50 dark:bg-zinc-800/50 rounded-lg p-4">
+            <div className="flex items-center gap-3 mb-2">
+              <div className="p-2 bg-blue-500/10 rounded-lg">
+                <IconId className="w-5 h-5 text-blue-500" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-xs font-medium text-zinc-500 dark:text-zinc-400">
+                  User ID
+                </p>
+                <div className="flex items-center gap-1">
+                  <p className="text-sm font-semibold text-zinc-900 dark:text-white font-mono">
+                    {user.userid}
+                  </p>
+                  <Tooltip orientation="top" tooltipText="Copy user ID">
+                    <button
+                      type="button"
+                      className="p-1 rounded hover:bg-zinc-200 dark:hover:bg-zinc-700 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 transition-colors flex-shrink-0"
+                      onClick={() => {
+                        navigator.clipboard.writeText(user.userid);
+                        toast.success("Copied to clipboard");
+                      }}
+                    >
+                      <IconCopy className="w-3.5 h-3.5" />
+                    </button>
+                  </Tooltip>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div className="bg-zinc-50 dark:bg-zinc-800/50 rounded-lg p-4">
+            <div className="flex items-start gap-3">
+              <div className="p-2 bg-indigo-500/10 rounded-lg">
+                <IconUser className="w-5 h-5 text-indigo-500" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-xs font-medium text-zinc-500 dark:text-zinc-400 mb-1">
+                  Discord ID
+                </p>
+                {editing ? (
+                  <div className="flex gap-1.5">
+                    <input
+                      type="text"
+                      value={discordId}
+                      onChange={(e) => setDiscordId(e.target.value)}
+                      placeholder="Enter Discord ID"
+                      className="flex-1 px-2 py-1 text-sm rounded-lg bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-600 text-zinc-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-primary/50"
+                    />
+                    <button
+                      type="button"
+                      onClick={pullDiscordFromBloxlink}
+                      disabled={pullingDiscord}
+                      className="inline-flex items-center gap-1 px-2 py-1 text-xs font-medium rounded-lg bg-indigo-50 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800 hover:bg-indigo-100 dark:hover:bg-indigo-900/50 disabled:opacity-50 transition-colors whitespace-nowrap"
+                      title="Pull Discord ID from Bloxlink"
+                    >
+                      <IconRefresh className={`w-3 h-3 ${pullingDiscord ? 'animate-spin' : ''}`} />
+                      Bloxlink
+                    </button>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-1">
+                    <p className="text-sm font-semibold text-zinc-900 dark:text-white">
+                      {workspaceMember?.discordId || "Not linked"}
+                    </p>
+                    {workspaceMember?.discordId && (
+                      <button
+                        type="button"
+                        title="Copy Discord ID"
+                        className="p-1 rounded hover:bg-zinc-200 dark:hover:bg-zinc-700 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 transition-colors flex-shrink-0"
+                        onClick={() => {
+                          navigator.clipboard.writeText(workspaceMember.discordId!);
+                          toast.success("Copied to clipboard");
+                        }}
+                      >
+                        <IconCopy className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+          <div className="bg-zinc-50 dark:bg-zinc-800/50 rounded-lg p-4">
+            <div className="flex items-start gap-3">
+              <div className="p-2 bg-sky-500/10 rounded-lg">
+                <IconMail className="w-5 h-5 text-sky-500" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-xs font-medium text-zinc-500 dark:text-zinc-400 mb-1">
+                  Email
+                </p>
+                {editing ? (
+                  <input
+                    type="email"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    placeholder="Enter email address"
+                    className="w-full px-2 py-1 text-sm rounded-lg bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-600 text-zinc-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-primary/50"
+                  />
+                ) : (
+                  <div className="flex items-center gap-1">
+                    <p className="text-sm font-semibold text-zinc-900 dark:text-white">
+                      {workspaceMember?.email || "Not set"}
+                    </p>
+                    {workspaceMember?.email && (
+                      <button
+                        type="button"
+                        title="Copy email"
+                        className="p-1 rounded hover:bg-zinc-200 dark:hover:bg-zinc-700 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 transition-colors flex-shrink-0"
+                        onClick={() => {
+                          navigator.clipboard.writeText(workspaceMember.email!);
+                          toast.success("Copied to clipboard");
+                        }}
+                      >
+                        <IconCopy className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+          <div className="bg-zinc-50 dark:bg-zinc-800/50 rounded-lg p-4">
+            <div className="flex items-start gap-3">
+              <div className="p-2 bg-pink-500/10 rounded-lg">
+                <IconCalendar className="w-5 h-5 text-pink-500" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-xs font-medium text-zinc-500 dark:text-zinc-400 mb-1">
+                  Birthday
+                </p>
+                {editing ? (
+                  <div className="flex gap-2">
+                    <select
+                      value={birthdayMonth}
+                      onChange={(e) => setBirthdayMonth(e.target.value)}
+                      className="flex-1 px-2 py-1 text-sm rounded-lg bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-600 text-zinc-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-primary/50"
+                    >
+                      <option value="">Month</option>
+                      {monthNames.slice(1).map((month, idx) => (
+                        <option key={idx + 1} value={idx + 1}>
+                          {month}
+                        </option>
+                      ))}
+                    </select>
+                    <select
+                      value={birthdayDay}
+                      onChange={(e) => setBirthdayDay(e.target.value)}
+                      className="flex-1 px-2 py-1 text-sm rounded-lg bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-600 text-zinc-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-primary/50"
+                    >
+                      <option value="">Day</option>
+                      {Array.from({ length: 31 }, (_, i) => i + 1).map((day) => (
+                        <option key={day} value={day}>
+                          {day}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                ) : (
+                  <p className="text-sm font-semibold text-zinc-900 dark:text-white">
+                    {user.birthdayDay && user.birthdayMonth
+                      ? `${monthNames[user.birthdayMonth]} ${user.birthdayDay}`
+                      : "Not set"}
+                  </p>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+        <div className="space-y-3">
+          <div className="bg-zinc-50 dark:bg-zinc-800/50 rounded-lg p-4 relative z-50">
+            <div className="flex items-start gap-3">
+              <div className="p-2 bg-purple-500/10 rounded-lg">
+                <IconClock className="w-5 h-5 text-purple-500" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-xs font-medium text-zinc-500 dark:text-zinc-400 mb-1">
+                  Timezone
+                </p>
+                {editing ? (
+                  <Listbox value={selectedTimezone} onChange={setSelectedTimezone}>
+                    <div className="relative">
+                      <Listbox.Button className="relative w-full cursor-pointer rounded-lg bg-white dark:bg-zinc-900 py-1 pl-2 pr-8 text-left text-sm border border-zinc-300 dark:border-zinc-600">
+                        <span className={`block truncate ${selectedTimezone ? 'text-zinc-900 dark:text-white' : 'text-zinc-400 dark:text-zinc-500'}`}>
+                          {selectedTimezone || "Select timezone..."}
+                        </span>
+                      </Listbox.Button>
+                      <Transition
+                        as={Fragment}
+                        leave="transition ease-in duration-100"
+                        leaveFrom="opacity-100"
+                        leaveTo="opacity-0"
+                      >
+                        <Listbox.Options className="absolute z-[100] mt-1 max-h-60 w-full overflow-auto rounded-lg bg-white dark:bg-zinc-900 py-1 text-sm shadow-lg border border-zinc-200 dark:border-zinc-700">
+                          <Listbox.Option
+                            value=""
+                            className={({ active }) =>
+                              `relative cursor-pointer select-none py-2 px-3 ${
+                                active ? "bg-primary/10 text-primary" : "text-zinc-400 dark:text-zinc-500"
+                              }`
+                            }
+                          >
+                            Not set
+                          </Listbox.Option>
+                          {timezoneOptions.map((tz) => (
+                            <Listbox.Option
+                              key={tz}
+                              className={({ active }) =>
+                                `relative cursor-pointer select-none py-2 px-3 ${
+                                  active ? "bg-primary/10 text-primary" : "text-zinc-900 dark:text-white"
+                                }`
+                              }
+                              value={tz}
+                            >
+                              {tz}
+                            </Listbox.Option>
+                          ))}
+                        </Listbox.Options>
+                      </Transition>
+                    </div>
+                  </Listbox>
+                ) : (
+                  <p className="text-sm font-semibold text-zinc-900 dark:text-white">
+                    {formatTimezoneDisplay(workspaceMember?.timezone)}
+                  </p>
+                )}
+              </div>
+            </div>
+          </div>
+          <div className="bg-zinc-50 dark:bg-zinc-800/50 rounded-lg p-4 relative z-40">
+            <div className="flex items-start gap-3">
+              <div className="p-2 bg-emerald-500/10 rounded-lg">
+                <IconBriefcase className="w-5 h-5 text-emerald-500" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-xs font-medium text-zinc-500 dark:text-zinc-400 mb-1">
+                  Department{selectedDepartments.length !== 1 ? 's' : ''}
+                </p>
+                {editing ? (
+                  <div className="space-y-2">
+                    {availableDepartments.length > 0 ? (
+                      <Listbox value={selectedDepartments} onChange={setSelectedDepartments} multiple by="id">
+                        <div className="relative">
+                          <Listbox.Button className="relative w-full cursor-pointer rounded-lg bg-white dark:bg-zinc-900 py-2 pl-3 pr-10 text-left border border-zinc-300 dark:border-zinc-600 focus:outline-none focus:ring-2 focus:ring-primary/50">
+                            <span className="block truncate text-zinc-900 dark:text-white">
+                              {selectedDepartments.length === 0
+                                ? "Select departments..."
+                                : selectedDepartments.length === 1
+                                ? selectedDepartments[0].name
+                                : `${selectedDepartments.length} departments selected`
+                              }
+                            </span>
+                            <span className="pointer-events-none absolute inset-y-0 right-0 flex items-center pr-2">
+                              <IconChevronDown className="h-5 w-5 text-zinc-400" aria-hidden="true" />
+                            </span>
+                          </Listbox.Button>
+                          <Transition
+                            as={Fragment}
+                            leave="transition ease-in duration-100"
+                            leaveFrom="opacity-100"
+                            leaveTo="opacity-0"
+                          >
+                            <Listbox.Options className="absolute z-[100] mt-1 max-h-60 w-full overflow-auto rounded-lg bg-white dark:bg-zinc-800 py-1 text-sm shadow-lg border border-zinc-200 dark:border-zinc-700 focus:outline-none">
+                              {availableDepartments.map((dept) => (
+                                <Listbox.Option
+                                  key={dept.id}
+                                  className={({ active }) =>
+                                    `relative cursor-pointer select-none py-2 pl-3 pr-9 ${
+                                      active ? "bg-primary/10 text-primary" : "text-zinc-900 dark:text-white"
+                                    }`
+                                  }
+                                  value={dept}
+                                >
+                                  {({ selected }) => (
+                                    <>
+                                      <div className="flex items-center gap-2">
+                                        <div 
+                                          className="w-3 h-3 rounded-full border border-zinc-300 dark:border-zinc-600 flex-shrink-0" 
+                                          style={{ backgroundColor: dept.color || "#6b7280" }}
+                                        />
+                                        <span className={`block truncate ${selected ? 'font-medium' : 'font-normal'}`}>
+                                          {dept.name}
+                                        </span>
+                                      </div>
+                                      {selected && (
+                                        <span className="absolute inset-y-0 right-0 flex items-center pr-3 text-firefli">
+                                          <IconCheck className="h-5 w-5" aria-hidden="true" />
+                                        </span>
+                                      )}
+                                    </>
+                                  )}
+                                </Listbox.Option>
+                              ))}
+                            </Listbox.Options>
+                          </Transition>
+                        </div>
+                      </Listbox>
+                    ) : (
+                      <p className="text-sm text-zinc-500 dark:text-zinc-400 italic">
+                        No departments available.
+                      </p>
+                    )}
+                  </div>
+                ) : (
+                  <div className="space-y-1">
+                    {selectedDepartments.length > 0 ? (
+                      selectedDepartments.map((dept) => (
+                        <div key={dept.id} className="flex items-center gap-2">
+                          <div 
+                            className="w-3 h-3 rounded-full border border-zinc-300 dark:border-zinc-600" 
+                            style={{ backgroundColor: dept.color || "#6b7280" }}
+                          />
+                          <span className="text-sm font-semibold text-zinc-900 dark:text-white">
+                            {dept.name}
+                          </span>
+                        </div>
+                      ))
+                    ) : (
+                      <p className="text-sm font-semibold text-zinc-900 dark:text-white">
+                        Not assigned
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+          {user.joinDate && (
+            <div className="bg-zinc-50 dark:bg-zinc-800/50 rounded-lg p-4">
+              <div className="flex items-center gap-3 mb-2">
+                <div className="p-2 bg-emerald-500/10 rounded-lg">
+                  <IconCalendar className="w-5 h-5 text-emerald-500" />
+                </div>
+                <div>
+                  <p className="text-xs font-medium text-zinc-500 dark:text-zinc-400">
+                    Join Date
+                  </p>
+                  <p className="text-sm font-semibold text-zinc-900 dark:text-white">
+                    {new Date(user.joinDate).toLocaleDateString()}
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
+
+          <div className="bg-zinc-50 dark:bg-zinc-800/50 rounded-lg p-4">
+            <div className="flex items-start gap-3">
+              <div className="p-2 bg-cyan-500/10 rounded-lg flex-shrink-0">
+                <IconUserCheck className="w-5 h-5 text-cyan-500" />
+              </div>
+              <div className="flex-1 min-w-0 relative z-10">
+                <p className="text-xs font-medium text-zinc-500 dark:text-zinc-400 mb-1">
+                  Line Manager
+                </p>
+                {editing ? (
+                  <Combobox value={selectedManager} onChange={setSelectedManager}>
+                    <div className="relative">
+                      <Combobox.Input
+                        className="relative w-full cursor-text rounded-lg bg-white dark:bg-zinc-900 py-1 pl-2 pr-8 text-left text-sm border border-zinc-300 dark:border-zinc-600 text-zinc-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-primary/50"
+                        displayValue={(manager: any) => manager?.username || ""}
+                        onChange={(event) => setManagerQuery(event.target.value)}
+                        placeholder="Search or select manager..."
+                      />
+                      <Transition
+                        as={Fragment}
+                        leave="transition ease-in duration-100"
+                        leaveFrom="opacity-100"
+                        leaveTo="opacity-0"
+                        afterLeave={() => setManagerQuery("")}
+                      >
+                        <Combobox.Options className="absolute z-50 mt-1 w-full overflow-auto rounded-lg bg-white dark:bg-zinc-800 py-1 text-sm shadow-xl border border-zinc-200 dark:border-zinc-700">
+                          <Combobox.Option
+                            className={({ active }) =>
+                              `relative cursor-pointer select-none py-2 px-3 ${
+                                active ? "bg-primary/10 text-primary" : "text-zinc-900 dark:text-white"
+                              }`
+                            }
+                            value={null}
+                          >
+                            {({ selected }) => (
+                              <span className={selected ? "font-semibold" : ""}>
+                                None
+                              </span>
+                            )}
+                          </Combobox.Option>
+                          {filteredManagers.length === 0 && managerQuery !== "" ? (
+                            <div className="py-2 px-3 text-zinc-500 dark:text-zinc-400 text-sm">
+                              No members found.
+                            </div>
+                          ) : (
+                            filteredManagers.map((member) => (
+                              <Combobox.Option
+                                key={member.userid}
+                                className={({ active }) =>
+                                  `relative cursor-pointer select-none py-2 px-3 flex items-center gap-2 ${
+                                    active ? "bg-primary/10" : ""
+                                  }`
+                                }
+                                value={member}
+                              >
+                                {({ selected }) => (
+                                  <>
+                                    <img
+                                      src={member.picture}
+                                      className="w-6 h-6 rounded-full"
+                                      alt={member.username}
+                                    />
+                                    <span className={`text-zinc-900 dark:text-white ${selected ? "font-semibold" : ""}`}>
+                                      {member.username}
+                                    </span>
+                                  </>
+                                )}
+                              </Combobox.Option>
+                            ))
+                          )}
+                        </Combobox.Options>
+                      </Transition>
+                    </div>
+                  </Combobox>
+                ) : (
+                  <div>
+                    {!(selectedManager || initialLineManager) && manages.length === 0 ? (
+                      <p className="text-sm font-semibold text-zinc-900 dark:text-white">
+                        Not assigned
+                      </p>
+                    ) : (
+                      <div className="space-y-0">
+                        {(selectedManager || initialLineManager) && (
+                          <>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                router.push(
+                                  `/workspace/${router.query.id}/profile/${(selectedManager || initialLineManager)!.userid}`
+                                )
+                              }
+                              className="flex items-center gap-2 group w-full text-left"
+                            >
+                              <div
+                                className={`rounded-full w-7 h-7 flex-shrink-0 flex items-center justify-center ${getRandomBg(
+                                  (selectedManager || initialLineManager)?.userid || ""
+                                )}`}
+                              >
+                                <img
+                                  src={(selectedManager || initialLineManager)?.picture}
+                                  className="rounded-full w-7 h-7 object-cover border border-white dark:border-zinc-800"
+                                  alt={(selectedManager || initialLineManager)?.username}
+                                />
+                              </div>
+                              <p className="text-sm font-semibold text-zinc-900 dark:text-white group-hover:text-primary transition-colors truncate">
+                                {(selectedManager || initialLineManager)?.username}
+                              </p>
+                            </button>
+                            <div className="ml-3 border-l-2 border-zinc-300 dark:border-zinc-600 h-3" />
+                          </>
+                        )}
+
+                        <div className="flex items-center gap-2">
+                          <div
+                            className={`rounded-full w-7 h-7 flex-shrink-0 flex items-center justify-center ${getRandomBg(user.userid)}`}
+                          >
+                            <img
+                              src={`/api/workspace/${router.query.id}/avatar/${user.userid}`}
+                              className="rounded-full w-7 h-7 object-cover border-2 border-primary"
+                              alt={user.username}
+                            />
+                          </div>
+                          <p className="text-sm font-semibold text-zinc-900 dark:text-white truncate">
+                            {user.username}
+                          </p>
+                          <span className="text-xs text-zinc-400 dark:text-zinc-500 flex-shrink-0">
+                            (this profile)
+                          </span>
+                        </div>
+
+                        {manages.length > 0 && (
+                          <div className="ml-3 border-l-2 border-zinc-300 dark:border-zinc-600 pl-3 mt-1 space-y-2">
+                            {manages.map((member) => (
+                              <div key={member.userid} className="flex items-center gap-2 relative">
+                                <div className="absolute -left-3 top-1/2 -translate-y-1/2 w-2.5 border-t-2 border-zinc-300 dark:border-zinc-600" />
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    router.push(
+                                      `/workspace/${router.query.id}/profile/${member.userid}`
+                                    )
+                                  }
+                                  className="flex items-center gap-2 group text-left"
+                                >
+                                  <img
+                                    src={member.picture}
+                                    className="w-6 h-6 rounded-full object-cover border border-white dark:border-zinc-700 flex-shrink-0"
+                                    alt={member.username}
+                                  />
+                                  <p className="text-sm font-semibold text-zinc-900 dark:text-white group-hover:text-primary transition-colors truncate">
+                                    {member.username}
+                                  </p>
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}

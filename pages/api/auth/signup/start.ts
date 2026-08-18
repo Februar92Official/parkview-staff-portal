@@ -1,0 +1,50 @@
+// Next.js API route support: https://nextjs.org/docs/api-routes/introduction
+import type { NextApiRequest, NextApiResponse } from 'next'
+import { fetchworkspace, getConfig, setConfig } from '@/utils/configEngine'
+import prisma from '@/utils/database';
+import { withSessionRoute } from '@/lib/withSession'
+import { getUsername, getThumbnail, getDisplayName } from '@/utils/userinfoEngine'
+import { getRobloxUserId } from '@/utils/roblox'
+type Data = {
+	success: boolean
+	error?: string
+	code?: string
+}
+
+export default withSessionRoute(handler);
+
+export async function handler(
+	req: NextApiRequest,
+	res: NextApiResponse<Data>
+) {
+	if (req.method !== 'POST') return res.status(405).json({ success: false, error: 'Method not allowed' })
+	if (req.session.userid) return res.status(400).json({ success: false, error: 'Already logged in' })
+	const { username } = req.body;
+	if (!username) return res.status(400).json({ success: false, error: 'Missing username' })
+	const userid = await getRobloxUserId(username).catch(() => null) as number | undefined;
+	if (!userid) return res.status(404).json({ success: false, error: 'Username not found' })
+	
+	// Check if user is already registered
+	const existingUser = await prisma.user.findUnique({
+		where: { userid: BigInt(userid) },
+		select: { registered: true, info: { select: { passwordhash: true } } }
+	});
+	
+	if (existingUser?.registered || existingUser?.info?.passwordhash) {
+		return res.status(400).json({ 
+			success: false, 
+			error: `User ${username} is already registered. Please use the login form instead.` 
+		});
+	}
+	const array = ['📋', '🎉', '🎂', '📆', '✔️', '📃', '👍', '➕', '📢', '🐒', '🐴', '🐑', '🐘', '🐼', '🐧', '🐦', '🐤', '🐥', '🐣', '🐔', '🐍', '🐢', '🐛', '🐝', '🐜', '📕', '📗', '📘', '📙', '📓', '📔', '📒', '📚', '📖', '🔖', '🎯', '🏈', '🏀', '⚽', '⚾', '🎾', '🎱', '🏉', '🎳', '⛳', '🚵', '🚴', '🏁', '🏇']
+	const verificationCode = `🤖${Array.from({ length: 11 }, () => array[Math.floor(Math.random() * array.length)]).join('')}`;
+	
+
+	req.session.verification = {
+		userid,
+		verificationCode
+	}
+	await req.session.save()
+	
+	res.status(200).json({ success: true, code: verificationCode })
+}
